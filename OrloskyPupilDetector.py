@@ -415,7 +415,7 @@ def process_frames(thresholded_image_strict, thresholded_image_medium, threshold
         cv2.circle(test_frame, (center_x, center_y), 3, (0, 255, 0), -1)
         cv2.putText(test_frame, "SPACE = play/pause", (10,410), cv2.FONT_HERSHEY_SIMPLEX, .55, (255,90,30), 2) #space
         cv2.putText(test_frame, "Q      = quit", (10,430), cv2.FONT_HERSHEY_SIMPLEX, .55, (255,90,30), 2) #quit
-        cv2.putText(test_frame, "D      = play/pause and show debug", (10,450), cv2.FONT_HERSHEY_SIMPLEX, .55, (255,90,30), 2) #debug
+        cv2.putText(test_frame, "D      = show debug", (10,450), cv2.FONT_HERSHEY_SIMPLEX, .55, (255,90,30), 2) #debug
 
     cv2.imshow('best_thresholded_image_contours_on_frame', test_frame)
     
