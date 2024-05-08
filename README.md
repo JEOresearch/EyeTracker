@@ -7,6 +7,8 @@ To use the script, run "python .\OrloskyPupilDetector.py" from your shell. If th
 
 A test video (eye_test.mp4) is included in the root directory for testing. When running the script on this test video, your results should look like this - https://youtu.be/B06cUMplDHw.  
 
+To help support this software and other open-source projects, please consider subscribing to my YouTube channel: https://www.youtube.com/@jeoresearch
+
 Requirements:
 - A Python environment
 
