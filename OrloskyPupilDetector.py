@@ -318,7 +318,7 @@ def check_ellipse_goodness(binary_image, contour, debug_mode_on):
     # Calculate the percentage of covered white pixels within the ellipse
     if ellipse_area == 0:
         print("area was 0")
-        return 0  # Avoid division by zero if the ellipse area is somehow zero
+        return ellipse_goodness  # Avoid division by zero if the ellipse area is somehow zero
     
     #percentage of covered pixels to number of pixels under area
     ellipse_goodness[0] = covered_pixels / ellipse_area
