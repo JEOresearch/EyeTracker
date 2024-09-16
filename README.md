@@ -15,7 +15,7 @@ Requirements:
 - A Python environment
 
 Packages
-- numpy
+- numpy ****There is a known issue with numpy 2.0.0. Downgrading to 1.26.0 or another version can solve this issue.
 - opencv
 
 Assumptions
