@@ -7,7 +7,9 @@ To use the script, run "python .\OrloskyPupilDetector.py" from your shell. If th
 
 A test video (eye_test.mp4) is included in the root directory for testing. Algorithm details are explained here: https://www.youtube.com/watch?v=bL92JUBG8xw
 
-When running the script on this test video, your results should look like this - https://youtu.be/B06cUMplDHw.  
+When running the script on this test video, your results should look like this: https://youtu.be/B06cUMplDHw.  
+
+If you need an eye camera, I have instructions for building your own IR camera for under $100 here: https://www.youtube.com/watch?v=8lZqCMRMtC8
 
 To help support this software and other open-source projects, please consider subscribing to my YouTube channel: https://www.youtube.com/@jeoresearch
 
