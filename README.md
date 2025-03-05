@@ -9,7 +9,8 @@ A test video (eye_test.mp4) is included in the root directory for testing. Algor
 
 When running the script on this test video, your results should look like this: https://youtu.be/B06cUMplDHw.  
 
-If you need an eye camera, I have instructions for building your own IR camera for under $100 here: https://www.youtube.com/watch?v=8lZqCMRMtC8
+If you need an eye camera with custome LEDs, I have instructions for building your own IR camera for under $100 here: https://www.youtube.com/watch?v=8lZqCMRMtC8
+Alternatively, there is a small $17 IR camera that works well with some modification: https://amzn.to/41x8p2W
 
 To help support this software and other open-source projects, please consider subscribing to my YouTube channel: https://www.youtube.com/@jeoresearch
 
