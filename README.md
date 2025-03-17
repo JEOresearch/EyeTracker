@@ -14,6 +14,13 @@ Alternatively, there is a small $17 IR camera that works well with some modifica
 
 To help support this software and other open-source projects, please consider subscribing to my YouTube channel: https://www.youtube.com/@jeoresearch
 
+Other useful tools/supplies 
+- Spinel Camera (~$100): https://amzn.to/3D8faQB (price may vary)
+- LEDs for Spinel ($8): https://amzn.to/41rEwAS
+- USB Extension cable x2 ($8): https://amzn.to/4knyf1N (for extending GC0308 cable)
+
+Affiliate links on this page help support the channel at no extra cost to you. As an Amazon Associate, I earn from qualifying purchases. All earnings support the development of open-source software and projects like this! 
+
 Requirements:
 - A Python environment
 
