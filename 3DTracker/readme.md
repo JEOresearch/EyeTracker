@@ -12,7 +12,10 @@ OpenCV (opencv-python)
 NumPy
 (Optional) PyOpenGL and gl_sphere.py for 3D visualization
 
-
+To install dependencies via terminal: 
+```bash
+pip install opencv-python numpy tkinter
+```
 
 Output
 gaze_vector.txt: Continuously updated with the current origin and direction vector. You can read this into Unity using the GazeFollower.cs script. It just reads the file constantly and updates the position and direction of the object it's attached to. 
