@@ -23,6 +23,4 @@ gaze_vector.txt: Continuously updated with the current origin and direction vect
 Gaze vectors are also shown in the bottom-left corner of the OpenCV display.
 
 Notes
-If gl_sphere.py is not found, the script still runs without OpenGL output.
-
 Press Q to quit or Space to pause a frame.
