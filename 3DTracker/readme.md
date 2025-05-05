@@ -9,10 +9,10 @@ An inexpensive eye tracking camera and extension cables for testing can be found
 To help support this software and other open-source projects, please consider subscribing to my YouTube channel: https://www.youtube.com/@jeoresearch
 
 Requirements
-Python 3 or above
-OpenCV (opencv-python)
-NumPy
-(Optional) PyOpenGL and gl_sphere.py for 3D visualization
+- Python 3 or above
+- OpenCV (opencv-python)
+- NumPy
+- (Optional) PyOpenGL and gl_sphere.py for 3D visualization
 
 To install dependencies via terminal: 
 ```bash
