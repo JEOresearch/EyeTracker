@@ -20,9 +20,8 @@ pip install opencv-python numpy tkinter
 ```
 
 Output
-gaze_vector.txt: Continuously updated with the current origin and direction vector. You can read this into Unity using the GazeFollower.cs script. It just reads the file constantly and updates the position and direction of the object it's attached to. 
-
-Gaze vectors are also shown in the bottom-left corner of the OpenCV display.
+- gaze_vector.txt: Continuously updated with the current origin and direction vector. You can read this into Unity using the GazeFollower.cs script. It just reads the file constantly and updates the position and direction of the object it's attached to. 
+- Gaze vectors are also shown in the bottom-left corner of the OpenCV display.
 
 Notes
-Press Q to quit or Space to pause a frame.
+- Press Q to quit or Space to pause a frame.
