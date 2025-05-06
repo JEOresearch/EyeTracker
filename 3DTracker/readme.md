@@ -1,4 +1,4 @@
-This project provides a real-time 3D eye tracking system using a webcam, OpenCV, and optional OpenGL visualization. It detects the pupil in each frame, fits an ellipse to estimate eye orientation, and projects a 3D gaze direction vector from the user's eye center through the pupil.
+This project provides a real-time 3D eye tracking system using a near-eye infrared camera, OpenCV, and optional OpenGL visualization. It detects the pupil in each frame, fits an ellipse to estimate eye orientation, and projects a 3D gaze direction vector from the user's eye center through the pupil.
 
 The only file you need to do the eyetracking is Orlosky3DEyeTracker.py, though gl_sphere.py can be included to provide a render of the 3D sphere. In the GUI that runs with the application, you’ll be prompted to select a webcam or video file. The main display shows the detected pupil and 3D origin and direction vector. If gl_sphere is available, a 3D model will be rendered in a separate OpenGL window. A video with DIY tracking glasses and sample output can be found here: https://youtu.be/zuoOvywtwtA
 
