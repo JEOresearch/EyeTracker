@@ -670,7 +670,25 @@ def compute_gaze_vector(x, y, center_x, center_y, screen_width=640, screen_heigh
 
     discriminant = b**2 - 4 * a * c
     if discriminant < 0:
-        return None, None
+        # Compute the closest point to the sphere (tangent point approximation)
+        t = -np.dot(direction, L) / np.dot(direction, direction)
+        intersection_point = origin + t * direction
+        intersection_local = intersection_point - sphere_center
+        target_direction = intersection_local / np.linalg.norm(intersection_local)
+    else:
+        sqrt_disc = np.sqrt(discriminant)
+        t1 = (-b - sqrt_disc) / (2 * a)
+        t2 = (-b + sqrt_disc) / (2 * a)
+
+        t = None
+        if t1 > 0 and t2 > 0:
+            t = min(t1, t2)
+        elif t1 > 0:
+            t = t1
+        elif t2 > 0:
+            t = t2
+        if t is None:
+            return None, None
 
     sqrt_disc = np.sqrt(discriminant)
     t1 = (-b - sqrt_disc) / (2 * a)
