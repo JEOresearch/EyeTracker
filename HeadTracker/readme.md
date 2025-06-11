@@ -34,7 +34,7 @@ FEATURES
 - Virtual wireframe cube aligned to your head orientation.
 - Mouse control mapped to yaw and pitch angle from your face.
 - Press F7 to toggle mouse control on/off.
-- Press 'c' to calibrate when looking straight at the center.
+- Press 'c' to calibrate when looking straight at your monitor center.
 - Press 'q' to quit the application.
 
 NOTES
