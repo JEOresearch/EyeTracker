@@ -25,10 +25,14 @@ USAGE
 -----
 1. Ensure a webcam is connected. The script defaults to camera index 1. Change to 0 if needed.
 2. Run the script:
+```bash
     python MonitorTracking.py
-3. Run the cursor visualization (optional) in a separate terminal:
+```
+4. Run the cursor visualization (optional) in a separate terminal:
+```bash
     python CursorCircle.py
-5. Two windows will appear:
+```
+6. Two windows will appear:
     - "Head-Aligned Cube": shows your face with overlayed bounding box and tracking vector.
     - "Facial Landmarks": shows the detected facial landmarks.
 
