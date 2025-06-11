@@ -17,7 +17,9 @@ REQUIREMENTS
 - Keyboard
 
 To install the required packages:
+```bash
     pip install opencv-python mediapipe numpy pyautogui keyboard
+```
 
 USAGE
 -----
