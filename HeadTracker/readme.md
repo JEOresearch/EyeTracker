@@ -28,11 +28,11 @@ USAGE
 ```bash
     python MonitorTracking.py
 ```
-4. Run the cursor visualization (optional) in a separate terminal:
+3. Run the cursor visualization (optional) in a separate terminal:
 ```bash
     python CursorCircle.py
 ```
-6. Two windows will appear:
+4. Two windows will appear:
     - "Head-Aligned Cube": shows your face with overlayed bounding box and tracking vector.
     - "Facial Landmarks": shows the detected facial landmarks.
 
