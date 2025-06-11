@@ -7,6 +7,8 @@ To help support this software and other open-source projects, please consider su
 
 The webcam used for tracking can be found here ($35): https://amzn.to/43of401
 
+Output should look like this video: https://youtu.be/hImmJDTgXjw
+
 REQUIREMENTS
 ------------
 - Python 3.x
