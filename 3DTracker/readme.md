@@ -6,7 +6,7 @@ An inexpensive eye tracking camera and extension cables for testing can be found
 - GC0308 Eye Tracking Camera ($17): https://amzn.to/41x8p2W
 - USB extension cables ($10): https://amzn.to/43SznVl
 
-To help support this software and other open-source projects, please consider subscribing to my YouTube channel: https://www.youtube.com/@jeoresearch
+To help support this software and other open-source projects, please consider subscribing to my YouTube channel: https://www.youtube.com/@jeoresearch, or joining for $1 per month: https://www.youtube.com/@jeoresearch/join. 
 
 Requirements
 - Python 3 or above
