@@ -12,7 +12,7 @@ When running the script on this test video, your results should look like this: 
 If you need an eye camera with custome LEDs, I have instructions for building your own IR camera for under $100 here: https://www.youtube.com/watch?v=8lZqCMRMtC8
 Alternatively, there is a small $17 IR camera that works well with some modification: https://amzn.to/41x8p2W
 
-To help support this software and other open-source projects, please consider subscribing to my YouTube channel: https://www.youtube.com/@jeoresearch
+To help support this software and other open-source projects, please consider subscribing to my YouTube channel: https://www.youtube.com/@jeoresearch, or joining for $1 per month: https://www.youtube.com/@jeoresearch/join. 
 
 Other useful tools/supplies 
 - Spinel Camera (~$100): https://amzn.to/3D8faQB (price may vary)
