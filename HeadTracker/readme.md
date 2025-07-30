@@ -3,7 +3,7 @@ HEAD TRACKING MOUSE CONTROL
 
 This script uses your webcam and MediaPipe's Face Mesh to estimate your head pose and control the mouse cursor using head orientation.
 
-To help support this software and other open-source projects, please consider subscribing to my YouTube channel: https://www.youtube.com/@jeoresearch
+To help support this software and other open-source projects, please consider subscribing to my YouTube channel: https://www.youtube.com/@jeoresearch, or joining for $1 per month: https://www.youtube.com/@jeoresearch/join. 
 
 The webcam used for tracking can be found here ($35): https://amzn.to/43of401
 
