@@ -1,4 +1,4 @@
-Eye Tracking and Monitor Control
+**Eye Tracking and Monitor Control**
 
 ====================================
 
