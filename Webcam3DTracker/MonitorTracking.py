@@ -666,7 +666,7 @@ def render_debug_view_orbit(
 
     # --- Key command help text in lower-left ---
     help_text = [
-        "C = calibrate",
+        "C = calibrate screen center",
         "J = yaw left",
         "L = yaw right",
         "I = pitch up",
@@ -674,7 +674,9 @@ def render_debug_view_orbit(
         "[ = zoom out",
         "] = zoom in",
         "R = reset view",
-        "X = add marker"
+        "X = add marker",
+        "q = quit",
+        "F7 = toggle mouse control"
     ]
 
     font        = cv2.FONT_HERSHEY_SIMPLEX
@@ -1029,4 +1031,5 @@ while cap.isOpened():
 
 
 cap.release()
+
 cv2.destroyAllWindows()
