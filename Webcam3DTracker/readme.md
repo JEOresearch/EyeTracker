@@ -44,9 +44,7 @@ Make sure you look at screen center when pressing c. The debug view won't render
 Markers (x key) allow quick tests of where the system thinks you are looking.
 
 Troubleshooting
-
-If gaze appears jittery, increase filter_length.
-
-If the wrong camera opens, change cv2.VideoCapture(0) to another index.
-
-For better accuracy, use consistent lighting and this webcam: https://amzn.to/43of401.
+-----
+- If gaze appears jittery, increase filter_length.
+- If the wrong camera opens, change cv2.VideoCapture(0) to another index.
+- For better accuracy, use consistent lighting and this webcam: https://amzn.to/43of401.
