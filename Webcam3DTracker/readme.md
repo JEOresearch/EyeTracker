@@ -29,14 +29,14 @@ Windows will open showing:
 
 Interactive controls:
 -----
-c = calibrate (screen center)
-F7 = toggle mouse control (disabled by default)
-j/l = orbit yaw left/right
-i/k = orbit pitch up/down
-[ / ] = zoom orbit view out/in
-r = reset orbit view
-x = stamp a green marker on the monitor where your gaze hits
-q = quit
+- c = calibrate (screen center)
+- F7 = toggle mouse control (disabled by default)
+- j/l = orbit yaw left/right
+- i/k = orbit pitch up/down
+- [ / ] = zoom orbit view out/in
+- r = reset orbit view
+- x = stamp a green marker on the monitor where your gaze hits
+- q = quit
 
 Notes
 -----
