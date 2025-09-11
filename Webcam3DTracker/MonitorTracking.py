@@ -81,7 +81,7 @@ nose_indices = [4, 45, 275, 220, 440, 1, 5, 51, 281, 44, 274, 241,
                 3, 248]
 
 # ===== NEW: File writing for screen position =====
-screen_position_file = "C:/Storage/Google Drive/Software/EyeTracker3DPython/screen_position.txt"
+screen_position_file = "./screen_position.txt"
 
 def write_screen_position(x, y):
     """Write screen position to file, overwriting the same line"""
