@@ -1,0 +1,14 @@
+[project]
+name = "webcam3dtracker"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "keyboard>=0.13.5",
+    "mediapipe>=0.10.21",
+    "numpy>=1.26.4",
+    "opencv-python>=4.11.0.86",
+    "pyautogui>=0.9.54",
+    "scipy>=1.16.2",
+]
