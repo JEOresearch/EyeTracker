@@ -15,8 +15,18 @@ MONITOR_WIDTH, MONITOR_HEIGHT = pyautogui.size()
 CENTER_X = MONITOR_WIDTH // 2
 CENTER_Y = MONITOR_HEIGHT // 2
 mouse_control_enabled = False
-filter_length = 10
+filter_length = 6
 gaze_length = 350
+
+# === Grid classification output parameters ===
+# Change these to set how many cells the screen is divided into
+OUTPUT_GRID_ROWS = 2   # rows (vertical divisions)
+OUTPUT_GRID_COLS = 2   # columns (horizontal divisions)
+NUM_CLASSES = OUTPUT_GRID_ROWS * OUTPUT_GRID_COLS
+
+# Output smoothing (exponential averaging on class probabilities)
+prob_smooth_alpha = 0.45   # 0 = full smoothing / 1 = no smoothing
+smooth_probs = None        # running average of class probability vector
 
 # --- Orbit camera state for the debug view ---
 orbit_yaw   = -151.0          # radians, left/right
@@ -59,15 +69,40 @@ R_ref_nose = [None]
 R_ref_forehead = [None]
 calibration_nose_scale = None
 
-# Initialize MediaPipe FaceMesh
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    static_image_mode=False,
-    max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
+# Initialize MediaPipe FaceMesh - Updated for new API
+BaseOptions = mp.tasks.BaseOptions
+FaceLandmarker = mp.tasks.vision.FaceLandmarker
+FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
+VisionRunningMode = mp.tasks.vision.RunningMode
+
+# Download model if not present
+model_path = "face_landmarker.task"
+if not os.path.exists(model_path):
+    print("Downloading face landmarker model...")
+    import urllib.request
+    model_url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
+    try:
+        urllib.request.urlretrieve(model_url, model_path)
+        print("Model downloaded successfully!")
+    except Exception as e:
+        print(f"Error downloading model: {e}")
+        print("Please download manually from: https://developers.google.com/mediapipe/solutions/vision/face_landmarker")
+        exit(1)
+
+# Create FaceLandmarker with options
+options = FaceLandmarkerOptions(
+    base_options=BaseOptions(model_asset_path=model_path),
+    running_mode=VisionRunningMode.VIDEO,
+    num_faces=1,
+    min_face_detection_confidence=0.5,
+    min_face_presence_confidence=0.5,
+    min_tracking_confidence=0.5,
+    output_face_blendshapes=False,
+    output_facial_transformation_matrixes=False
 )
+
+face_mesh = FaceLandmarker.create_from_options(options)
+USE_NEW_API = True
 
 # === Open webcam ===
 cap = cv2.VideoCapture(0)
@@ -81,12 +116,320 @@ nose_indices = [4, 45, 275, 220, 440, 1, 5, 51, 281, 44, 274, 241,
                 3, 248]
 
 # ===== NEW: File writing for screen position =====
-screen_position_file = "C:/Storage/Google Drive/Software/EyeTracker3DPython/screen_position.txt"
+screen_position_file = "screen_position.txt"
 
-def write_screen_position(x, y):
-    """Write screen position to file, overwriting the same line"""
-    with open(screen_position_file, 'w') as f:
-        f.write(f"{x},{y}\n")
+def write_screen_position(grid_row, grid_col, confidence, cell_index):
+    """Write predicted grid cell to file, overwriting the same line"""
+    try:
+        with open(screen_position_file, 'w') as f:
+            f.write(f"{grid_row},{grid_col},{cell_index},{confidence:.3f}\n")
+    except Exception as e:
+        # Silently ignore file write errors to not interrupt tracking
+        pass
+
+# ============================================================
+# Learned gaze-to-screen model (polynomial regression, numpy)
+# ============================================================
+
+CALIB_FILE = "calib_data.npz"
+
+# Calibration grid: (norm_x, norm_y) fractions of screen size
+# 5x5 = 25 points (rows top→bottom, cols left→right)
+CALIB_GRID_COLS = 5
+CALIB_GRID_ROWS = 5
+_margin = 0.1
+CALIB_POINTS = [
+    (_margin + c * (1.0 - 2 * _margin) / (CALIB_GRID_COLS - 1),
+     _margin + r * (1.0 - 2 * _margin) / (CALIB_GRID_ROWS - 1))
+    for r in range(CALIB_GRID_ROWS)
+    for c in range(CALIB_GRID_COLS)
+]
+CALIB_SAMPLES_PER_POINT = 30   # frames to average per target point
+CALIB_SETTLE_FRAMES     = 15   # frames to skip (let eyes settle on dot)
+
+# Head-pose sub-phases during calibration
+# Each calibration point is collected at multiple head orientations for robustness
+CALIB_HEAD_POSES = [
+    ("Center",        0.0,  0.0),   # (label, target_yaw_deg, target_pitch_deg)
+    ("Esquerda",  -8.0,  0.0),
+    ("Direita",  8.0,  0.0),
+]
+CALIB_HEAD_YAW_TOL   = 4.0   # degrees tolerance for head yaw matching
+CALIB_HEAD_PITCH_TOL = 4.0   # degrees tolerance for head pitch matching
+
+# Calibration mode state
+calib_mode          = False    # True while collecting calibration data
+calib_point_index   = 0        # which target point we're on
+calib_pose_index    = 0        # which head-pose sub-phase we're on
+calib_settle_count  = 0        # settle-frame counter
+calib_sample_count  = 0        # collected-sample counter for current point
+calib_X             = []       # accumulated feature vectors
+calib_Y             = []       # accumulated target grid cell indices
+calib_feat_buf      = []       # raw feature samples for current point (to be averaged)
+
+# Feature smoothing deque for model inference (separate from gaze direction deque)
+MODEL_SMOOTH_LEN = 5
+model_feat_history = deque(maxlen=MODEL_SMOOTH_LEN)
+
+
+class GazeModel:
+    """Softmax classification model mapping gaze features → screen grid cell.
+    
+    Uses degree-2 polynomial features with L2-regularised softmax (cross-entropy)
+    trained via L-BFGS optimisation.  Pure numpy + scipy.optimize — no sklearn.
+    """
+
+    POLY_DEGREE = 2
+
+    def __init__(self, num_classes=NUM_CLASSES):
+        self._W   = None   # weight matrix [n_features_poly, num_classes]
+        self._mu  = None   # feature mean for normalisation
+        self._sig = None   # feature std  for normalisation
+        self.num_classes = num_classes
+        self.fitted = False
+
+    # ------------------------------------------------------------------
+    def _poly_features(self, X):
+        """Degree-2 polynomial expansion (with bias column) of X [N, d]."""
+        X = np.atleast_2d(X)
+        cols = [np.ones((X.shape[0], 1))]
+        # degree 1
+        cols.append(X)
+        # degree 2: xi*xj for i<=j
+        n = X.shape[1]
+        for i in range(n):
+            for j in range(i, n):
+                cols.append((X[:, i] * X[:, j]).reshape(-1, 1))
+        return np.hstack(cols)
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _softmax(logits):
+        """Numerically stable softmax over last axis."""
+        e = np.exp(logits - logits.max(axis=1, keepdims=True))
+        return e / e.sum(axis=1, keepdims=True)
+
+    # ------------------------------------------------------------------
+    def fit(self, X_raw, Y_labels):
+        """Fit softmax classifier.
+        X_raw:    [N, d] feature vectors.
+        Y_labels: [N]    integer class labels in 0..num_classes-1.
+        """
+        from scipy.optimize import minimize as sp_minimize
+
+        X_raw    = np.array(X_raw, dtype=float)
+        Y_labels = np.array(Y_labels, dtype=int).ravel()
+        N = len(Y_labels)
+        K = self.num_classes
+
+        # z-score normalise inputs
+        self._mu  = X_raw.mean(axis=0)
+        self._sig = X_raw.std(axis=0) + 1e-8
+        Xn = (X_raw - self._mu) / self._sig
+        Xp = self._poly_features(Xn)          # [N, p]
+        p = Xp.shape[1]
+
+        # One-hot encode labels
+        Y_oh = np.zeros((N, K), dtype=float)
+        Y_oh[np.arange(N), Y_labels] = 1.0
+
+        lam = 0.1   # L2 regularisation strength
+
+        def loss_and_grad(w_flat):
+            W = w_flat.reshape(p, K)
+            logits = Xp @ W                    # [N, K]
+            probs  = self._softmax(logits)     # [N, K]
+            # Cross-entropy + L2 penalty
+            log_probs = np.log(probs + 1e-12)
+            ce = -np.sum(Y_oh * log_probs) / N
+            reg = 0.5 * lam * np.sum(W ** 2)
+            loss = ce + reg
+            # Gradient
+            dW = Xp.T @ (probs - Y_oh) / N + lam * W   # [p, K]
+            return loss, dW.ravel()
+
+        # Initial weights (small random)
+        w0 = np.random.randn(p * K) * 0.01
+        result = sp_minimize(loss_and_grad, w0, jac=True, method='L-BFGS-B',
+                             options={'maxiter': 500, 'ftol': 1e-8})
+        self._W = result.x.reshape(p, K)
+        self.fitted = True
+
+        # Training accuracy report
+        logits = Xp @ self._W
+        preds = np.argmax(logits, axis=1)
+        acc = np.mean(preds == Y_labels) * 100
+        # Per-class count
+        class_counts = np.bincount(Y_labels, minlength=K)
+        print(f"[GazeModel] Fitted softmax on {N} samples, "
+              f"{p} poly features, {K} classes.  "
+              f"Train accuracy: {acc:.1f}%")
+        print(f"[GazeModel] Samples per class: {class_counts.tolist()}")
+
+    # ------------------------------------------------------------------
+    def predict(self, feat):
+        """Predict grid cell from a single feature vector.
+        Returns (cell_index, confidence, probabilities) or None.
+        """
+        if not self.fitted:
+            return None
+        x = np.array(feat, dtype=float).reshape(1, -1)
+        xn = (x - self._mu) / self._sig
+        xp = self._poly_features(xn)           # [1, p]
+        logits = xp @ self._W                  # [1, K]
+        probs  = self._softmax(logits)[0]      # [K]
+        cell_idx = int(np.argmax(probs))
+        confidence = float(probs[cell_idx])
+        return cell_idx, confidence, probs
+
+    # ------------------------------------------------------------------
+    def save(self, path=CALIB_FILE):
+        np.savez(path, W=self._W, mu=self._mu, sig=self._sig,
+                 num_classes=np.array([self.num_classes]))
+        print(f"[GazeModel] Calibration saved to '{path}'.")
+
+    # ------------------------------------------------------------------
+    def load(self, path=CALIB_FILE):
+        try:
+            data = np.load(path)
+            W   = data['W']
+            mu  = data['mu']
+            sig = data['sig']
+            nc  = int(data['num_classes'][0]) if 'num_classes' in data else 0
+            # Validate feature dimension (11 = current extract_gaze_features length)
+            test_dim = 11
+            if mu.shape[0] != test_dim:
+                print(f"[GazeModel] Stale calibration (expected {test_dim} features, "
+                      f"got {mu.shape[0]}). Ignoring '{path}'.")
+                return False
+            if nc != self.num_classes:
+                print(f"[GazeModel] Grid size mismatch (file has {nc} classes, "
+                      f"current config has {self.num_classes}). Ignoring '{path}'.")
+                return False
+            self._W  = W
+            self._mu = mu
+            self._sig = sig
+            self.fitted = True
+            print(f"[GazeModel] Calibration loaded from '{path}' "
+                  f"({nc} classes, {mu.shape[0]} features).")
+            return True
+        except Exception as e:
+            print(f"[GazeModel] Could not load '{path}': {e}")
+            return False
+
+
+# Singleton model instance
+gaze_model = GazeModel()
+gaze_model.load()   # load previous calibration if it exists
+
+
+def extract_gaze_features(combined_dir, R_final, iris_3d_left, iris_3d_right,
+                           sphere_world_l, sphere_world_r, head_center):
+    """Return a compact feature vector for the gaze classification model.
+
+    Features (11 total):
+      [0:3]  left iris offset from sphere, in HEAD-LOCAL frame (unit vector)
+      [3:6]  right iris offset from sphere, in HEAD-LOCAL frame (unit vector)
+      [6:8]  combined gaze yaw/pitch proxy (head-local x/y of combined dir)
+      [8:11] head Euler angles (yaw, pitch, roll) in radians — helps the
+             model compensate for head-pose variation seen during calibration.
+    """
+    # --- iris offsets in head-local frame (most stable gaze signal) ---
+    def iris_local(iris3d, sphere_w):
+        raw = np.asarray(iris3d, dtype=float) - np.asarray(sphere_w, dtype=float)
+        local = R_final.T @ raw
+        n = np.linalg.norm(local)
+        return local / (n + 1e-9)
+
+    il = iris_local(iris_3d_left,  sphere_world_l)
+    ir = iris_local(iris_3d_right, sphere_world_r)
+
+    # --- combined gaze in head-local frame (yaw/pitch proxy) ---
+    d = np.asarray(combined_dir, dtype=float)
+    d = d / (np.linalg.norm(d) + 1e-9)
+    d_local = R_final.T @ d
+    gaze_xy = d_local[:2]   # 2 values
+
+    # --- head Euler angles (yaw, pitch, roll) ---
+    r_scipy = Rscipy.from_matrix(R_final)
+    head_yaw, head_pitch, head_roll = r_scipy.as_euler('yxz', degrees=False)
+
+    return np.array([il[0], il[1], il[2],
+                     ir[0], ir[1], ir[2],
+                     gaze_xy[0], gaze_xy[1],
+                     head_yaw, head_pitch, head_roll], dtype=float)
+
+
+def draw_calibration_overlay(frame, point_idx, pose_idx, settle_count, sample_count,
+                              current_head_yaw_deg=0.0):
+    """Draw calibration dot, head-pose guidance, ring countdown, and progress HUD."""
+    total  = len(CALIB_POINTS)
+    nx, ny = CALIB_POINTS[point_idx]
+    tx = int(nx * MONITOR_WIDTH)
+    ty = int(ny * MONITOR_HEIGHT)
+
+    n_poses = len(CALIB_HEAD_POSES)
+    pose_label, target_yaw, target_pitch = CALIB_HEAD_POSES[pose_idx]
+
+    # --- Webcam frame annotation ---
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (frame.shape[1], frame.shape[0]), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
+
+    # Progress text
+    prog_text = f"Calibration: point {point_idx + 1}/{total}, pose {pose_idx + 1}/{n_poses}"
+    cv2.putText(frame, prog_text, (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 220, 0), 2, cv2.LINE_AA)
+
+    # Head-pose guidance
+    head_instr = f"Head: {pose_label}  (yaw target: {target_yaw:+.0f} deg, current: {current_head_yaw_deg:+.1f} deg)"
+    cv2.putText(frame, head_instr, (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 220, 255), 1, cv2.LINE_AA)
+
+    # Collection status
+    if settle_count < CALIB_SETTLE_FRAMES:
+        instr = "Look at the dot, match head pose..."
+        color_dot = (100, 100, 255)
+    else:
+        instr = f"Collecting... {sample_count}/{CALIB_SAMPLES_PER_POINT}"
+        color_dot = (0, 255, 100)
+    cv2.putText(frame, instr, (10, 75),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1, cv2.LINE_AA)
+
+    # --- Fullscreen calibration window ---
+    cal_win = np.zeros((MONITOR_HEIGHT, MONITOR_WIDTH, 3), dtype=np.uint8)
+
+    # Head-pose arrow indicator (top-center)
+    arrow_cx = MONITOR_WIDTH // 2
+    arrow_cy = 60
+    arrow_len = 40
+    # Arrow pointing in target yaw direction
+    dx = int(arrow_len * math.sin(math.radians(target_yaw)))
+    dy = 0
+    cv2.arrowedLine(cal_win, (arrow_cx, arrow_cy), (arrow_cx + dx, arrow_cy + dy),
+                    (180, 220, 255), 3, tipLength=0.35)
+    cv2.putText(cal_win, f"Turn head: {pose_label}",
+                (arrow_cx - 120, arrow_cy + 35),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 220, 255), 2, cv2.LINE_AA)
+    cv2.putText(cal_win, f"Your yaw: {current_head_yaw_deg:+.1f} deg",
+                (arrow_cx - 100, arrow_cy + 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 180, 220), 1, cv2.LINE_AA)
+
+    # Outer ring (progress arc)
+    if settle_count >= CALIB_SETTLE_FRAMES and CALIB_SAMPLES_PER_POINT > 0:
+        frac = sample_count / CALIB_SAMPLES_PER_POINT
+        angle = int(360 * frac)
+        cv2.ellipse(cal_win, (tx, ty), (28, 28), -90, 0, angle, (0, 200, 80), 4)
+    # Dot
+    cv2.circle(cal_win, (tx, ty), 14, color_dot, -1)
+    cv2.circle(cal_win, (tx, ty),  4, (255, 255, 255), -1)
+    # Point index + pose
+    cv2.putText(cal_win, f"{point_idx + 1}/{total} [{pose_label}]",
+                (tx + 18, ty - 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1, cv2.LINE_AA)
+    cv2.imshow("Calibration", cal_win)
+    cv2.setWindowProperty("Calibration", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
 
 def _rot_x(a):
     ca, sa = math.cos(a), math.sin(a)
@@ -666,7 +1009,9 @@ def render_debug_view_orbit(
 
     # --- Key command help text in lower-left ---
     help_text = [
-        "C = calibrate screen center",
+        "C = lock eye spheres",
+        "M = start model calibration",
+        "S = re-centre (fallback)",
         "J = yaw left",
         "L = yaw right",
         "I = pitch up",
@@ -726,10 +1071,20 @@ while cap.isOpened():
     combined_dir = None  # will be filled once you compute a smoothed direction
 
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(frame_rgb)
+    
+    # Process frame with appropriate API
+    if USE_NEW_API:
+        # New API: convert frame to MediaPipe Image
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+        timestamp_ms = int(time.time() * 1000)
+        results = face_mesh.detect_for_video(mp_image, timestamp_ms)
+        face_landmarks = results.face_landmarks[0] if results.face_landmarks else None
+    else:
+        # Old API
+        results = face_mesh.process(frame_rgb)
+        face_landmarks = results.multi_face_landmarks[0].landmark if results.multi_face_landmarks else None
 
-    if results.multi_face_landmarks:
-        face_landmarks = results.multi_face_landmarks[0].landmark
+    if face_landmarks:
 
         # Index for left iris center point (from MediaPipe's iris model)
         left_iris_idx = 468
@@ -807,21 +1162,121 @@ while cap.isOpened():
 
             combined_dir = avg_combined_direction
 
-            # ==== CONVERT GAZE TO SCREEN COORDINATES ====
-            screen_x, screen_y, raw_yaw, raw_pitch = convert_gaze_to_screen_coordinates(
-                avg_combined_direction, 
-                calibration_offset_yaw, 
-                calibration_offset_pitch
+            # ==== EXTRACT FEATURES FOR MODEL ====
+            feat = extract_gaze_features(
+                avg_combined_direction,
+                R_final,
+                iris_3d_left, iris_3d_right,
+                sphere_world_l, sphere_world_r,
+                head_center
             )
 
-            # Update mouse target
+            # ==== CALIBRATION DATA COLLECTION ====
+            if calib_mode:
+                # Extract current head yaw for guidance display
+                r_head = Rscipy.from_matrix(R_final)
+                current_head_yaw_deg = r_head.as_euler('yxz', degrees=True)[0]
+
+                draw_calibration_overlay(frame, calib_point_index, calib_pose_index,
+                                         calib_settle_count, calib_sample_count,
+                                         current_head_yaw_deg)
+
+                if calib_settle_count < CALIB_SETTLE_FRAMES:
+                    calib_settle_count += 1
+                else:
+                    # Accumulate raw feature for this point+pose
+                    calib_feat_buf.append(feat.copy())
+                    calib_sample_count += 1
+
+                    if calib_sample_count >= CALIB_SAMPLES_PER_POINT:
+                        # Average features collected for this pose → one training row
+                        avg_feat = np.mean(calib_feat_buf, axis=0)
+
+                        # Compute grid cell index as target label
+                        nx, ny = CALIB_POINTS[calib_point_index]
+                        grid_col = min(int(nx * OUTPUT_GRID_COLS), OUTPUT_GRID_COLS - 1)
+                        grid_row = min(int(ny * OUTPUT_GRID_ROWS), OUTPUT_GRID_ROWS - 1)
+                        cell_idx = grid_row * OUTPUT_GRID_COLS + grid_col
+
+                        calib_X.append(avg_feat)
+                        calib_Y.append(cell_idx)
+
+                        # Advance to next head-pose sub-phase
+                        calib_pose_index += 1
+                        calib_settle_count = 0
+                        calib_sample_count = 0
+                        calib_feat_buf     = []
+
+                        if calib_pose_index >= len(CALIB_HEAD_POSES):
+                            # All poses done for this point → next calibration point
+                            calib_pose_index = 0
+                            calib_point_index += 1
+
+                            if calib_point_index >= len(CALIB_POINTS):
+                                # All points collected — fit model
+                                calib_mode = False
+                                cv2.destroyWindow("Calibration")
+                                gaze_model.fit(calib_X, calib_Y)
+                                gaze_model.save()
+                                # Reset output smoothing
+                                smooth_probs = None
+                                model_feat_history.clear()
+                                print("[Calibration] Complete. Model fitted and saved.")
+
+            # ==== CONVERT GAZE TO GRID CELL ====
+            predicted_cell = None
+            predicted_row = None
+            predicted_col = None
+            cell_confidence = 0.0
+
+            if gaze_model.fitted and not calib_mode:
+                # Smooth the feature vector over recent frames before predicting
+                model_feat_history.append(feat.copy())
+                smooth_feat = np.mean(model_feat_history, axis=0)
+
+                pred = gaze_model.predict(smooth_feat)
+                if pred is not None:
+                    cell_idx, conf, probs = pred
+
+                    # Exponential moving average on class probabilities
+                    if smooth_probs is None:
+                        smooth_probs = probs.copy()
+                    else:
+                        smooth_probs = smooth_probs + prob_smooth_alpha * (probs - smooth_probs)
+
+                    predicted_cell = int(np.argmax(smooth_probs))
+                    cell_confidence = float(smooth_probs[predicted_cell])
+                    predicted_row = predicted_cell // OUTPUT_GRID_COLS
+                    predicted_col = predicted_cell % OUTPUT_GRID_COLS
+
+                    # Map to cell centre pixel for optional mouse control
+                    cell_cx = int((predicted_col + 0.5) / OUTPUT_GRID_COLS * MONITOR_WIDTH)
+                    cell_cy = int((predicted_row + 0.5) / OUTPUT_GRID_ROWS * MONITOR_HEIGHT)
+                    screen_x, screen_y = cell_cx, cell_cy
+                else:
+                    screen_x, screen_y = CENTER_X, CENTER_Y
+
+                mode_label = "GRID"
+            else:
+                screen_x, screen_y, raw_yaw, raw_pitch = convert_gaze_to_screen_coordinates(
+                    avg_combined_direction,
+                    calibration_offset_yaw,
+                    calibration_offset_pitch
+                )
+                mode_label = "FALLBACK"
+
+            # Update mouse target (snaps to cell centre when using grid model)
             if mouse_control_enabled:
                 with mouse_lock:
                     mouse_target[0] = screen_x
                     mouse_target[1] = screen_y
 
-            # ===== NEW: Write screen position to file =====
-            write_screen_position(screen_x, screen_y)
+            # ===== Write grid cell to file =====
+            if predicted_cell is not None:
+                write_screen_position(predicted_row, predicted_col,
+                                      cell_confidence, predicted_cell)
+            else:
+                write_screen_position(-1, -1, 0.0, -1)
 
             # Draw combined gaze ray for visualization
             combined_origin = (sphere_world_l + sphere_world_r) / 2
@@ -833,24 +1288,53 @@ while cap.isOpened():
                 (255, 255, 10), 3
             )
 
-            # Center multiple lines of text
-            texts = [
-                f"Screen: ({screen_x}, {screen_y})",
-                #f"Mouse: {'ON' if mouse_control_enabled else 'OFF'}"
-            ]
+            # ==== DRAW GRID OVERLAY ON WEBCAM FRAME ====
+            if predicted_cell is not None:
+                # Draw grid lines on the webcam frame (scaled to webcam resolution)
+                for r in range(1, OUTPUT_GRID_ROWS):
+                    y_line = int(r * h / OUTPUT_GRID_ROWS)
+                    cv2.line(frame, (0, y_line), (w, y_line), (80, 80, 80), 1)
+                for c in range(1, OUTPUT_GRID_COLS):
+                    x_line = int(c * w / OUTPUT_GRID_COLS)
+                    cv2.line(frame, (x_line, 0), (x_line, h), (80, 80, 80), 1)
 
+                # Highlight the predicted cell with a semi-transparent overlay
+                cell_x0 = int(predicted_col * w / OUTPUT_GRID_COLS)
+                cell_y0 = int(predicted_row * h / OUTPUT_GRID_ROWS)
+                cell_x1 = int((predicted_col + 1) * w / OUTPUT_GRID_COLS)
+                cell_y1 = int((predicted_row + 1) * h / OUTPUT_GRID_ROWS)
+                cell_overlay = frame.copy()
+                cv2.rectangle(cell_overlay, (cell_x0, cell_y0), (cell_x1, cell_y1),
+                              (0, 255, 0), -1)
+                alpha = min(0.35, cell_confidence * 0.5)  # brighter when more confident
+                cv2.addWeighted(cell_overlay, alpha, frame, 1 - alpha, 0, frame)
+                cv2.rectangle(frame, (cell_x0, cell_y0), (cell_x1, cell_y1),
+                              (0, 255, 0), 2)
+
+                # Cell label inside the highlighted cell
+                cell_label = f"R{predicted_row}C{predicted_col} ({cell_confidence:.0%})"
+                cv2.putText(frame, cell_label,
+                            (cell_x0 + 5, cell_y0 + 22),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+
+            # HUD text
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.7
             thickness = 2
-            line_spacing = 30
 
-            for i, text in enumerate(texts):
-                (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-                center_x = (w - text_width) // 2
-                #center_y = (h // 2) + (i - len(texts)//2) * line_spacing
-                
-                color = (0, 255, 0) if "Mouse: ON" not in text else (0, 255, 0) if mouse_control_enabled else (0, 0, 255)
-                cv2.putText(frame, text, (center_x, 30), font, font_scale, color, thickness)
+            if predicted_cell is not None:
+                hud_lines = [
+                    f"Grid: R{predicted_row} C{predicted_col}  ({cell_confidence:.0%})  [{mode_label}]",
+                    f"Grid size: {OUTPUT_GRID_ROWS}x{OUTPUT_GRID_COLS}",
+                ]
+            else:
+                hud_lines = [
+                    f"Screen: ({screen_x}, {screen_y})  [{mode_label}]",
+                ]
+            for i, text in enumerate(hud_lines):
+                (tw, _), _ = cv2.getTextSize(text, font, font_scale, thickness)
+                cx = (w - tw) // 2
+                cv2.putText(frame, text, (cx, 30 + i * 30), font, font_scale, (0, 255, 0), thickness)
 
         # Draw all landmark points in white
         for idx, lm in enumerate(face_landmarks):
@@ -862,9 +1346,8 @@ while cap.isOpened():
 
         # Build 3D landmarks in your existing scale (x*w, y*h, z*w)
         landmarks3d = None
-        if results.multi_face_landmarks:
-            lm = results.multi_face_landmarks[0].landmark
-            landmarks3d = np.array([[p.x * w, p.y * h, p.z * w] for p in lm], dtype=float)
+        if face_landmarks:
+            landmarks3d = np.array([[p.x * w, p.y * h, p.z * w] for p in face_landmarks], dtype=float)
 
         render_debug_view_orbit(
             h, w,
@@ -951,26 +1434,38 @@ while cap.isOpened():
 
 
         print("[Both Spheres Locked] Eye sphere calibration complete.")
+    elif key == ord('m') and left_sphere_locked and right_sphere_locked:
+        # Start multi-point model calibration with head-pose variation
+        calib_mode        = True
+        calib_point_index = 0
+        calib_pose_index  = 0
+        calib_settle_count = 0
+        calib_sample_count = 0
+        calib_X           = []
+        calib_Y           = []
+        calib_feat_buf    = []
+        smooth_probs      = None
+        model_feat_history.clear()
+        total = len(CALIB_POINTS)
+        n_poses = len(CALIB_HEAD_POSES)
+        print(f"[Calibration] Starting {total}-point x {n_poses}-pose calibration "
+              f"({total * n_poses} total collections).  "
+              f"Grid: {OUTPUT_GRID_ROWS}x{OUTPUT_GRID_COLS} = {NUM_CLASSES} cells.")
     elif key == ord('s') and left_sphere_locked and right_sphere_locked:
-        # Screen calibration - user should look at center of screen when pressing 's'
-        # Get current gaze direction
+        # Fallback single-point centre calibration (kept for convenience)
         left_gaze_dir = iris_3d_left - sphere_world_l
         left_gaze_dir /= np.linalg.norm(left_gaze_dir)
         right_gaze_dir = iris_3d_right - sphere_world_r
         right_gaze_dir /= np.linalg.norm(right_gaze_dir)
         current_combined_direction = (left_gaze_dir + right_gaze_dir) / 2
         current_combined_direction /= np.linalg.norm(current_combined_direction)
-        
-        # Calculate what the raw angles would be without calibration
         _, _, raw_yaw, raw_pitch = convert_gaze_to_screen_coordinates(
-            current_combined_direction, 0, 0  # no calibration offset
+            current_combined_direction, 0, 0
         )
-        
-        # Set calibration offsets to center the gaze
-        calibration_offset_yaw = 0 - raw_yaw
+        calibration_offset_yaw   = 0 - raw_yaw
         calibration_offset_pitch = 0 - raw_pitch
-        
-        print(f"[Screen Calibrated] Offset Yaw: {calibration_offset_yaw:.2f}, Offset Pitch: {calibration_offset_pitch:.2f}")
+        print(f"[Screen Calibrated] Offset Yaw: {calibration_offset_yaw:.2f}, "
+              f"Offset Pitch: {calibration_offset_pitch:.2f}")
     elif key == ord('x'):
         # Drop a marker at the current gaze∩monitor point
         if (monitor_corners is not None and monitor_center_w is not None and monitor_normal_w is not None
