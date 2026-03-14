@@ -15,7 +15,7 @@ MONITOR_WIDTH, MONITOR_HEIGHT = pyautogui.size()
 CENTER_X = MONITOR_WIDTH // 2
 CENTER_Y = MONITOR_HEIGHT // 2
 mouse_control_enabled = False
-filter_length = 6
+filter_length = 10  # increased from 6 for smoother tracking
 gaze_length = 350
 
 # === Grid classification output parameters ===
@@ -25,8 +25,73 @@ OUTPUT_GRID_COLS = 2   # columns (horizontal divisions)
 NUM_CLASSES = OUTPUT_GRID_ROWS * OUTPUT_GRID_COLS
 
 # Output smoothing (exponential averaging on class probabilities)
-prob_smooth_alpha = 0.45   # 0 = full smoothing / 1 = no smoothing
+prob_smooth_alpha = 0.30   # lowered from 0.45 for smoother output (0 = full smoothing / 1 = no smoothing)
 smooth_probs = None        # running average of class probability vector
+
+# Temporal consistency: reject sudden jumps
+prev_predicted_cell = None
+cell_hold_counter = 0
+CELL_HOLD_THRESHOLD = 3   # must predict same cell N frames before switching
+
+# =====================================================================
+# 1-Euro Filter — adaptive low-pass filter (reduces jitter, keeps responsiveness)
+# =====================================================================
+class OneEuroFilter:
+    """1-Euro filter for smoothing scalar or vector signals.
+    Lower min_cutoff = more smoothing; higher beta = faster reaction to speed."""
+    def __init__(self, freq=30.0, min_cutoff=1.0, beta=0.007, d_cutoff=1.0):
+        self.freq = freq
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self.x_prev = None
+        self.dx_prev = None
+        self.t_prev = None
+
+    def _smoothing_factor(self, cutoff):
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau * self.freq)
+
+    def __call__(self, x, t=None):
+        x = np.asarray(x, dtype=float)
+        if self.x_prev is None:
+            self.x_prev = x.copy()
+            self.dx_prev = np.zeros_like(x)
+            self.t_prev = t if t is not None else 0.0
+            return x.copy()
+
+        if t is not None and self.t_prev is not None:
+            dt = t - self.t_prev
+            if dt > 0:
+                self.freq = 1.0 / dt
+        self.t_prev = t
+
+        # Derivative (speed)
+        a_d = self._smoothing_factor(self.d_cutoff)
+        dx = (x - self.x_prev) * self.freq
+        dx_hat = a_d * dx + (1.0 - a_d) * self.dx_prev
+
+        # Adaptive cutoff
+        cutoff = self.min_cutoff + self.beta * np.abs(dx_hat)
+        if cutoff.ndim > 0:
+            # Per-component smoothing factors
+            result = np.empty_like(x)
+            for i in range(len(x)):
+                a = self._smoothing_factor(float(cutoff[i]))
+                result[i] = a * x[i] + (1.0 - a) * self.x_prev[i]
+        else:
+            a = self._smoothing_factor(float(cutoff))
+            result = a * x + (1.0 - a) * self.x_prev
+
+        self.x_prev = result.copy()
+        self.dx_prev = dx_hat.copy()
+        return result
+
+# Create 1-Euro filter instances for gaze direction and screen coordinates
+gaze_dir_filter = OneEuroFilter(freq=30.0, min_cutoff=0.8, beta=0.005, d_cutoff=1.0)
+feat_filter = OneEuroFilter(freq=30.0, min_cutoff=1.5, beta=0.01, d_cutoff=1.0)
+screen_filter_x = OneEuroFilter(freq=30.0, min_cutoff=0.5, beta=0.3, d_cutoff=1.0)
+screen_filter_y = OneEuroFilter(freq=30.0, min_cutoff=0.5, beta=0.3, d_cutoff=1.0)
 
 # --- Orbit camera state for the debug view ---
 orbit_yaw   = -151.0          # radians, left/right
@@ -89,14 +154,14 @@ if not os.path.exists(model_path):
         print("Please download manually from: https://developers.google.com/mediapipe/solutions/vision/face_landmarker")
         exit(1)
 
-# Create FaceLandmarker with options
+# Create FaceLandmarker with options (higher thresholds → more reliable landmarks)
 options = FaceLandmarkerOptions(
     base_options=BaseOptions(model_asset_path=model_path),
     running_mode=VisionRunningMode.VIDEO,
     num_faces=1,
-    min_face_detection_confidence=0.5,
-    min_face_presence_confidence=0.5,
-    min_tracking_confidence=0.5,
+    min_face_detection_confidence=0.7,   # raised from 0.5
+    min_face_presence_confidence=0.7,    # raised from 0.5
+    min_tracking_confidence=0.7,         # raised from 0.5
     output_face_blendshapes=False,
     output_facial_transformation_matrixes=False
 )
@@ -114,6 +179,29 @@ h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 nose_indices = [4, 45, 275, 220, 440, 1, 5, 51, 281, 44, 274, 241, 
                 461, 125, 354, 218, 438, 195, 167, 393, 165, 391,
                 3, 248]
+
+# === Eye, iris, eyebrow and face landmark indices (MediaPipe FaceMesh 478) ===
+# Left eye contour (upper lid, lower lid, corners)
+LEFT_EYE_IDX  = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
+RIGHT_EYE_IDX = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
+# Eye corners (inner, outer)
+LEFT_EYE_INNER, LEFT_EYE_OUTER   = 133, 33
+RIGHT_EYE_INNER, RIGHT_EYE_OUTER = 362, 263
+# Upper/lower lid midpoints for EAR
+LEFT_UPPER_LID  = [159, 145]   # top-center landmarks
+LEFT_LOWER_LID  = [23, 130]    # bottom-center landmarks
+RIGHT_UPPER_LID = [386, 374]
+RIGHT_LOWER_LID = [253, 359]
+# Iris perimeter (4 points around each iris center)
+LEFT_IRIS_PERIM  = [469, 470, 471, 472]
+RIGHT_IRIS_PERIM = [474, 475, 476, 477]
+# Eyebrow midpoints
+LEFT_BROW_MID, RIGHT_BROW_MID = 105, 334
+# Face dimension landmarks
+FACE_TOP = 10       # forehead
+FACE_BOTTOM = 152   # chin
+FACE_LEFT = 234     # left cheek
+FACE_RIGHT = 454    # right cheek
 
 # ===== NEW: File writing for screen position =====
 screen_position_file = "screen_position.txt"
@@ -144,15 +232,13 @@ CALIB_POINTS = [
     for r in range(CALIB_GRID_ROWS)
     for c in range(CALIB_GRID_COLS)
 ]
-CALIB_SAMPLES_PER_POINT = 30   # frames to average per target point
-CALIB_SETTLE_FRAMES     = 15   # frames to skip (let eyes settle on dot)
+CALIB_SAMPLES_PER_POINT = 45   # increased from 30 — more samples = more robust average
+CALIB_SETTLE_FRAMES     = 25   # increased from 15 — longer settle for stable eye position
 
 # Head-pose sub-phases during calibration
 # Each calibration point is collected at multiple head orientations for robustness
 CALIB_HEAD_POSES = [
     ("Center",        0.0,  0.0),   # (label, target_yaw_deg, target_pitch_deg)
-    ("Esquerda",  -8.0,  0.0),
-    ("Direita",  8.0,  0.0),
 ]
 CALIB_HEAD_YAW_TOL   = 4.0   # degrees tolerance for head yaw matching
 CALIB_HEAD_PITCH_TOL = 4.0   # degrees tolerance for head pitch matching
@@ -168,15 +254,16 @@ calib_Y             = []       # accumulated target grid cell indices
 calib_feat_buf      = []       # raw feature samples for current point (to be averaged)
 
 # Feature smoothing deque for model inference (separate from gaze direction deque)
-MODEL_SMOOTH_LEN = 5
+MODEL_SMOOTH_LEN = 8  # increased from 5 for smoother inference
 model_feat_history = deque(maxlen=MODEL_SMOOTH_LEN)
 
 
 class GazeModel:
     """Softmax classification model mapping gaze features → screen grid cell.
     
-    Uses degree-2 polynomial features with L2-regularised softmax (cross-entropy)
-    trained via L-BFGS optimisation.  Pure numpy + scipy.optimize — no sklearn.
+    Uses degree-2 interaction features (selected) with L2-regularised softmax
+    trained via L-BFGS optimisation.  Includes cross-validation for lambda.
+    Pure numpy + scipy.optimize — no sklearn.
     """
 
     POLY_DEGREE = 2
@@ -187,10 +274,13 @@ class GazeModel:
         self._sig = None   # feature std  for normalisation
         self.num_classes = num_classes
         self.fitted = False
+        self._selected_cols = None  # feature selection indices
 
     # ------------------------------------------------------------------
     def _poly_features(self, X):
-        """Degree-2 polynomial expansion (with bias column) of X [N, d]."""
+        """Degree-2 polynomial expansion (with bias column) of X [N, d].
+        Uses only interaction terms between related feature groups to avoid
+        overfitting from too many high-dimensional terms."""
         X = np.atleast_2d(X)
         cols = [np.ones((X.shape[0], 1))]
         # degree 1
@@ -203,6 +293,18 @@ class GazeModel:
         return np.hstack(cols)
 
     # ------------------------------------------------------------------
+    def _select_features(self, Xp, Y_labels, K):
+        """Variance-based feature selection: drop near-zero-variance poly columns."""
+        var = np.var(Xp, axis=0)
+        # Keep features whose variance is above 1% of the max variance
+        threshold = 0.01 * var.max() if var.max() > 0 else 0
+        mask = var > threshold
+        # Always keep bias column
+        mask[0] = True
+        selected = np.where(mask)[0]
+        return selected
+
+    # ------------------------------------------------------------------
     @staticmethod
     def _softmax(logits):
         """Numerically stable softmax over last axis."""
@@ -210,8 +312,30 @@ class GazeModel:
         return e / e.sum(axis=1, keepdims=True)
 
     # ------------------------------------------------------------------
+    def _fit_with_lambda(self, Xp, Y_oh, K, lam, maxiter=800):
+        """Fit softmax for a given lambda, return (W, final_loss)."""
+        from scipy.optimize import minimize as sp_minimize
+        N, p = Xp.shape
+
+        def loss_and_grad(w_flat):
+            W = w_flat.reshape(p, K)
+            logits = Xp @ W
+            probs  = self._softmax(logits)
+            log_probs = np.log(probs + 1e-12)
+            ce = -np.sum(Y_oh * log_probs) / N
+            reg = 0.5 * lam * np.sum(W ** 2)
+            loss = ce + reg
+            dW = Xp.T @ (probs - Y_oh) / N + lam * W
+            return loss, dW.ravel()
+
+        w0 = np.random.randn(p * K) * 0.01
+        result = sp_minimize(loss_and_grad, w0, jac=True, method='L-BFGS-B',
+                             options={'maxiter': maxiter, 'ftol': 1e-9})
+        return result.x.reshape(p, K), result.fun
+
+    # ------------------------------------------------------------------
     def fit(self, X_raw, Y_labels):
-        """Fit softmax classifier.
+        """Fit softmax classifier with cross-validated regularisation.
         X_raw:    [N, d] feature vectors.
         Y_labels: [N]    integer class labels in 0..num_classes-1.
         """
@@ -222,37 +346,62 @@ class GazeModel:
         N = len(Y_labels)
         K = self.num_classes
 
-        # z-score normalise inputs
-        self._mu  = X_raw.mean(axis=0)
-        self._sig = X_raw.std(axis=0) + 1e-8
+        # Robust z-score normalise inputs (use median/MAD for outlier resistance)
+        self._mu  = np.median(X_raw, axis=0)
+        mad = np.median(np.abs(X_raw - self._mu), axis=0)
+        self._sig = mad * 1.4826 + 1e-8  # MAD to std estimate
         Xn = (X_raw - self._mu) / self._sig
-        Xp = self._poly_features(Xn)          # [N, p]
+        Xp_full = self._poly_features(Xn)
+
+        # Feature selection: drop near-zero-variance polynomial columns
+        self._selected_cols = self._select_features(Xp_full, Y_labels, K)
+        Xp = Xp_full[:, self._selected_cols]
         p = Xp.shape[1]
+        print(f"[GazeModel] Feature selection: {Xp_full.shape[1]} → {p} features.")
 
         # One-hot encode labels
         Y_oh = np.zeros((N, K), dtype=float)
         Y_oh[np.arange(N), Y_labels] = 1.0
 
-        lam = 0.1   # L2 regularisation strength
+        # Cross-validation to choose best lambda
+        lambdas = [0.01, 0.05, 0.1, 0.2, 0.5]
+        best_lam = 0.1
+        best_val_acc = -1.0
 
-        def loss_and_grad(w_flat):
-            W = w_flat.reshape(p, K)
-            logits = Xp @ W                    # [N, K]
-            probs  = self._softmax(logits)     # [N, K]
-            # Cross-entropy + L2 penalty
-            log_probs = np.log(probs + 1e-12)
-            ce = -np.sum(Y_oh * log_probs) / N
-            reg = 0.5 * lam * np.sum(W ** 2)
-            loss = ce + reg
-            # Gradient
-            dW = Xp.T @ (probs - Y_oh) / N + lam * W   # [p, K]
-            return loss, dW.ravel()
+        if N >= 10:  # only CV if enough data
+            n_folds = min(5, N // K) if N // K >= 2 else 2
+            indices = np.arange(N)
+            np.random.shuffle(indices)
+            fold_size = N // n_folds
 
-        # Initial weights (small random)
-        w0 = np.random.randn(p * K) * 0.01
-        result = sp_minimize(loss_and_grad, w0, jac=True, method='L-BFGS-B',
-                             options={'maxiter': 500, 'ftol': 1e-8})
-        self._W = result.x.reshape(p, K)
+            for lam in lambdas:
+                fold_accs = []
+                for fold in range(n_folds):
+                    val_idx = indices[fold * fold_size:(fold + 1) * fold_size]
+                    train_idx = np.concatenate([indices[:fold * fold_size],
+                                                indices[(fold + 1) * fold_size:]])
+                    if len(train_idx) < 2 or len(val_idx) < 1:
+                        continue
+                    Xp_tr = Xp[train_idx]
+                    Y_oh_tr = Y_oh[train_idx]
+                    Xp_val = Xp[val_idx]
+                    Y_val = Y_labels[val_idx]
+
+                    W_fold, _ = self._fit_with_lambda(Xp_tr, Y_oh_tr, K, lam, maxiter=300)
+                    preds_val = np.argmax(Xp_val @ W_fold, axis=1)
+                    fold_accs.append(np.mean(preds_val == Y_val))
+
+                if fold_accs:
+                    mean_acc = np.mean(fold_accs)
+                    print(f"  [CV] lambda={lam:.3f}  val_acc={mean_acc:.1%}")
+                    if mean_acc > best_val_acc:
+                        best_val_acc = mean_acc
+                        best_lam = lam
+
+            print(f"[GazeModel] Best lambda={best_lam:.3f} (CV acc={best_val_acc:.1%})")
+
+        # Final fit on all data with best lambda
+        self._W, final_loss = self._fit_with_lambda(Xp, Y_oh, K, best_lam, maxiter=1000)
         self.fitted = True
 
         # Training accuracy report
@@ -275,8 +424,15 @@ class GazeModel:
             return None
         x = np.array(feat, dtype=float).reshape(1, -1)
         xn = (x - self._mu) / self._sig
-        xp = self._poly_features(xn)           # [1, p]
+        xp_full = self._poly_features(xn)      # [1, p_full]
+        if self._selected_cols is not None:
+            xp = xp_full[:, self._selected_cols]
+        else:
+            xp = xp_full
         logits = xp @ self._W                  # [1, K]
+        # Temperature scaling for better calibrated confidences
+        temperature = 1.5
+        logits = logits / temperature
         probs  = self._softmax(logits)[0]      # [K]
         cell_idx = int(np.argmax(probs))
         confidence = float(probs[cell_idx])
@@ -284,8 +440,11 @@ class GazeModel:
 
     # ------------------------------------------------------------------
     def save(self, path=CALIB_FILE):
-        np.savez(path, W=self._W, mu=self._mu, sig=self._sig,
-                 num_classes=np.array([self.num_classes]))
+        save_dict = dict(W=self._W, mu=self._mu, sig=self._sig,
+                         num_classes=np.array([self.num_classes]))
+        if self._selected_cols is not None:
+            save_dict['selected_cols'] = self._selected_cols
+        np.savez(path, **save_dict)
         print(f"[GazeModel] Calibration saved to '{path}'.")
 
     # ------------------------------------------------------------------
@@ -296,8 +455,8 @@ class GazeModel:
             mu  = data['mu']
             sig = data['sig']
             nc  = int(data['num_classes'][0]) if 'num_classes' in data else 0
-            # Validate feature dimension (11 = current extract_gaze_features length)
-            test_dim = 11
+            # Validate feature dimension (43 = current extract_gaze_features length)
+            test_dim = 43
             if mu.shape[0] != test_dim:
                 print(f"[GazeModel] Stale calibration (expected {test_dim} features, "
                       f"got {mu.shape[0]}). Ignoring '{path}'.")
@@ -309,6 +468,10 @@ class GazeModel:
             self._W  = W
             self._mu = mu
             self._sig = sig
+            if 'selected_cols' in data:
+                self._selected_cols = data['selected_cols']
+            else:
+                self._selected_cols = None
             self.fitted = True
             print(f"[GazeModel] Calibration loaded from '{path}' "
                   f"({nc} classes, {mu.shape[0]} features).")
@@ -323,41 +486,263 @@ gaze_model = GazeModel()
 gaze_model.load()   # load previous calibration if it exists
 
 
-def extract_gaze_features(combined_dir, R_final, iris_3d_left, iris_3d_right,
-                           sphere_world_l, sphere_world_r, head_center):
-    """Return a compact feature vector for the gaze classification model.
+# ---------- helper: 3D landmark as array ----------
+def _lm3d(face_landmarks, idx, w, h):
+    """Return landmark `idx` as a 3-vector in pixel-scale world coords."""
+    lm = face_landmarks[idx]
+    return np.array([lm.x * w, lm.y * h, lm.z * w], dtype=float)
 
-    Features (11 total):
-      [0:3]  left iris offset from sphere, in HEAD-LOCAL frame (unit vector)
-      [3:6]  right iris offset from sphere, in HEAD-LOCAL frame (unit vector)
-      [6:8]  combined gaze yaw/pitch proxy (head-local x/y of combined dir)
-      [8:11] head Euler angles (yaw, pitch, roll) in radians — helps the
-             model compensate for head-pose variation seen during calibration.
+
+def extract_gaze_features(combined_dir, R_final, iris_3d_left, iris_3d_right,
+                           sphere_world_l, sphere_world_r, head_center,
+                           face_landmarks=None, frame_w=None, frame_h=None,
+                           scale_ratio=1.0, left_gaze_dir=None, right_gaze_dir=None):
+    """Return a rich feature vector for the gaze classification model.
+
+    Feature layout (43 dimensions):
+      [ 0: 3]  left iris offset from sphere  (head-local, unit)           3
+      [ 3: 6]  right iris offset from sphere (head-local, unit)           3
+      [ 6: 8]  combined gaze direction proxy  (head-local x,y)            2
+      [ 8:11]  head Euler angles (yaw, pitch, roll) in radians            3
+      [11:13]  iris-in-eye-socket ratio (left x, left y)                  2
+      [13:15]  iris-in-eye-socket ratio (right x, right y)                2
+      [15:16]  left Eye Aspect Ratio  (EAR)                               1
+      [16:17]  right Eye Aspect Ratio (EAR)                               1
+      [17:19]  left iris ellipse semi-axes  (a, b) normalised             2
+      [19:21]  right iris ellipse semi-axes (a, b) normalised             2
+      [21:22]  vergence angle (radians between L/R gaze dirs)             1
+      [22:23]  gaze-head divergence angle (rad)                           1
+      [23:24]  inter-iris distance  (head-local, normalised)              1
+      [24:27]  head-centre position (head-local, normalised)              3
+      [27:28]  scale ratio (distance proxy)                               1
+      [28:29]  face width/height ratio                                    1
+      [29:31]  eyebrow height above eye (left, right) normalised          2
+      [31:34]  combined gaze full (head-local x, y, z)                    3
+      [34:37]  left gaze dir  (head-local)                                3
+      [37:40]  right gaze dir (head-local)                                3
+      [40:43]  sphere separation (head-local, normalised)                 3
+                                                                   total 43
     """
-    # --- iris offsets in head-local frame (most stable gaze signal) ---
+    fw = frame_w if frame_w else 640
+    fh = frame_h if frame_h else 480
+
+    # ---- helpers ----
+    def to_local(v):
+        """World vector → head-local frame."""
+        return R_final.T @ np.asarray(v, dtype=float)
+
+    def unit(v):
+        v = np.asarray(v, dtype=float)
+        n = np.linalg.norm(v)
+        return v / (n + 1e-9)
+
+    # ================================================================
+    # 1) Iris offsets from sphere (head-local, unit)  [0:6]   6 dims
+    # ================================================================
     def iris_local(iris3d, sphere_w):
         raw = np.asarray(iris3d, dtype=float) - np.asarray(sphere_w, dtype=float)
-        local = R_final.T @ raw
-        n = np.linalg.norm(local)
-        return local / (n + 1e-9)
+        return unit(to_local(raw))
 
     il = iris_local(iris_3d_left,  sphere_world_l)
     ir = iris_local(iris_3d_right, sphere_world_r)
 
-    # --- combined gaze in head-local frame (yaw/pitch proxy) ---
-    d = np.asarray(combined_dir, dtype=float)
-    d = d / (np.linalg.norm(d) + 1e-9)
-    d_local = R_final.T @ d
-    gaze_xy = d_local[:2]   # 2 values
+    # ================================================================
+    # 2) Combined gaze direction proxy (head-local x,y) [6:8]  2 dims
+    # ================================================================
+    d = unit(np.asarray(combined_dir, dtype=float))
+    d_local = to_local(d)
+    gaze_xy = d_local[:2]
 
-    # --- head Euler angles (yaw, pitch, roll) ---
+    # ================================================================
+    # 3) Head Euler angles [8:11]  3 dims
+    # ================================================================
     r_scipy = Rscipy.from_matrix(R_final)
     head_yaw, head_pitch, head_roll = r_scipy.as_euler('yxz', degrees=False)
 
-    return np.array([il[0], il[1], il[2],
-                     ir[0], ir[1], ir[2],
-                     gaze_xy[0], gaze_xy[1],
-                     head_yaw, head_pitch, head_roll], dtype=float)
+    # ================================================================
+    # Landmark-derived features (gracefully degrade if landmarks absent)
+    # ================================================================
+    # defaults
+    iris_socket_l = np.zeros(2)
+    iris_socket_r = np.zeros(2)
+    ear_l = 0.3
+    ear_r = 0.3
+    iris_ellipse_l = np.array([1.0, 1.0])
+    iris_ellipse_r = np.array([1.0, 1.0])
+    face_ratio = 1.0
+    brow_h_l = 0.0
+    brow_h_r = 0.0
+
+    if face_landmarks is not None:
+        # --- Iris-in-eye-socket ratio  [11:15]  4 dims ---
+        # Normalised position of iris between inner/outer corners (0..1)
+        def iris_socket_ratio(iris_idx, inner_idx, outer_idx, upper_idxs, lower_idxs):
+            iris_p  = _lm3d(face_landmarks, iris_idx, fw, fh)
+            inner_p = _lm3d(face_landmarks, inner_idx, fw, fh)
+            outer_p = _lm3d(face_landmarks, outer_idx, fw, fh)
+            horiz = outer_p - inner_p
+            h_len = np.linalg.norm(horiz) + 1e-9
+            # horizontal ratio
+            rx = np.dot(iris_p - inner_p, horiz / h_len) / h_len
+            # vertical ratio (between upper and lower lid midpoints)
+            upper_mid = np.mean([_lm3d(face_landmarks, i, fw, fh) for i in upper_idxs], axis=0)
+            lower_mid = np.mean([_lm3d(face_landmarks, i, fw, fh) for i in lower_idxs], axis=0)
+            vert = lower_mid - upper_mid
+            v_len = np.linalg.norm(vert) + 1e-9
+            ry = np.dot(iris_p - upper_mid, vert / v_len) / v_len
+            return np.array([rx, ry], dtype=float)
+
+        iris_socket_l = iris_socket_ratio(468, LEFT_EYE_INNER, LEFT_EYE_OUTER,
+                                          LEFT_UPPER_LID, LEFT_LOWER_LID)
+        iris_socket_r = iris_socket_ratio(473, RIGHT_EYE_INNER, RIGHT_EYE_OUTER,
+                                          RIGHT_UPPER_LID, RIGHT_LOWER_LID)
+
+        # --- Eye Aspect Ratio  [15:17]  2 dims ---
+        def compute_ear(upper_idxs, lower_idxs, inner_idx, outer_idx):
+            upper_pts = [_lm3d(face_landmarks, i, fw, fh) for i in upper_idxs]
+            lower_pts = [_lm3d(face_landmarks, i, fw, fh) for i in lower_idxs]
+            vert_sum = sum(np.linalg.norm(u - l) for u, l in zip(upper_pts, lower_pts))
+            horiz = np.linalg.norm(
+                _lm3d(face_landmarks, outer_idx, fw, fh) -
+                _lm3d(face_landmarks, inner_idx, fw, fh)
+            ) + 1e-9
+            return vert_sum / (2.0 * horiz)
+
+        ear_l = compute_ear(LEFT_UPPER_LID, LEFT_LOWER_LID,
+                            LEFT_EYE_INNER, LEFT_EYE_OUTER)
+        ear_r = compute_ear(RIGHT_UPPER_LID, RIGHT_LOWER_LID,
+                            RIGHT_EYE_INNER, RIGHT_EYE_OUTER)
+
+        # --- Iris ellipse semi-axes  [17:21]  4 dims ---
+        def iris_ellipse(perim_idxs):
+            pts = np.array([_lm3d(face_landmarks, i, fw, fh) for i in perim_idxs])
+            center = pts.mean(axis=0)
+            diffs = pts - center
+            dists = np.linalg.norm(diffs, axis=1)
+            # Approximate semi-major/minor as max/min distance from center
+            face_h = np.linalg.norm(
+                _lm3d(face_landmarks, FACE_TOP, fw, fh) -
+                _lm3d(face_landmarks, FACE_BOTTOM, fw, fh)
+            ) + 1e-9
+            return np.array([dists.max() / face_h, dists.min() / face_h], dtype=float)
+
+        iris_ellipse_l = iris_ellipse(LEFT_IRIS_PERIM)
+        iris_ellipse_r = iris_ellipse(RIGHT_IRIS_PERIM)
+
+        # --- Face width/height ratio  [28:29]  1 dim ---
+        face_w_dist = np.linalg.norm(
+            _lm3d(face_landmarks, FACE_LEFT, fw, fh) -
+            _lm3d(face_landmarks, FACE_RIGHT, fw, fh)
+        ) + 1e-9
+        face_h_dist = np.linalg.norm(
+            _lm3d(face_landmarks, FACE_TOP, fw, fh) -
+            _lm3d(face_landmarks, FACE_BOTTOM, fw, fh)
+        ) + 1e-9
+        face_ratio = face_w_dist / face_h_dist
+
+        # --- Eyebrow height above eye  [29:31]  2 dims ---
+        left_eye_center  = np.mean([_lm3d(face_landmarks, i, fw, fh) for i in LEFT_EYE_IDX], axis=0)
+        right_eye_center = np.mean([_lm3d(face_landmarks, i, fw, fh) for i in RIGHT_EYE_IDX], axis=0)
+        brow_h_l = (np.linalg.norm(
+            _lm3d(face_landmarks, LEFT_BROW_MID, fw, fh) - left_eye_center
+        )) / (face_h_dist)
+        brow_h_r = (np.linalg.norm(
+            _lm3d(face_landmarks, RIGHT_BROW_MID, fw, fh) - right_eye_center
+        )) / (face_h_dist)
+
+    # ================================================================
+    # 4) Vergence angle  [21:22]  1 dim
+    # ================================================================
+    if left_gaze_dir is not None and right_gaze_dir is not None:
+        lg = unit(np.asarray(left_gaze_dir, dtype=float))
+        rg = unit(np.asarray(right_gaze_dir, dtype=float))
+        vergence = float(np.arccos(np.clip(np.dot(lg, rg), -1.0, 1.0)))
+    else:
+        vergence = 0.0
+
+    # ================================================================
+    # 5) Gaze-head divergence  [22:23]  1 dim
+    # ================================================================
+    head_fwd = unit(-R_final[:, 2])  # head forward is -Z column
+    gaze_head_div = float(np.arccos(np.clip(np.dot(d, head_fwd), -1.0, 1.0)))
+
+    # ================================================================
+    # 6) Inter-iris distance (head-local, normalised)  [23:24]  1 dim
+    # ================================================================
+    inter_iris_raw = to_local(np.asarray(iris_3d_right, dtype=float) -
+                              np.asarray(iris_3d_left, dtype=float))
+    inter_iris_norm = float(np.linalg.norm(inter_iris_raw))
+    # Normalise by face height (proxy) to be scale-invariant
+    if face_landmarks is not None and frame_w is not None:
+        face_h_px = np.linalg.norm(
+            _lm3d(face_landmarks, FACE_TOP, fw, fh) -
+            _lm3d(face_landmarks, FACE_BOTTOM, fw, fh)
+        ) + 1e-9
+        inter_iris_feat = inter_iris_norm / face_h_px
+    else:
+        inter_iris_feat = inter_iris_norm / 100.0
+
+    # ================================================================
+    # 7) Head-centre position (head-local, normalised)  [24:27]  3 dims
+    # ================================================================
+    hc_local = to_local(np.asarray(head_center, dtype=float))
+    hc_local_norm = hc_local / (np.linalg.norm(hc_local) + 1e-9)
+
+    # ================================================================
+    # 8) Scale ratio  [27:28]  1 dim
+    # ================================================================
+    sr = float(scale_ratio)
+
+    # ================================================================
+    # 9) Combined gaze full (head-local x,y,z)  [31:34]  3 dims
+    # ================================================================
+    gaze_full_local = d_local  # already computed above
+
+    # ================================================================
+    # 10) Per-eye gaze dirs (head-local)  [34:40]  6 dims
+    # ================================================================
+    if left_gaze_dir is not None:
+        lg_local = unit(to_local(np.asarray(left_gaze_dir, dtype=float)))
+    else:
+        lg_local = d_local.copy()
+    if right_gaze_dir is not None:
+        rg_local = unit(to_local(np.asarray(right_gaze_dir, dtype=float)))
+    else:
+        rg_local = d_local.copy()
+
+    # ================================================================
+    # 11) Sphere separation (head-local, normalised)  [40:43]  3 dims
+    # ================================================================
+    sphere_sep = to_local(np.asarray(sphere_world_r, dtype=float) -
+                          np.asarray(sphere_world_l, dtype=float))
+    sphere_sep_norm = sphere_sep / (np.linalg.norm(sphere_sep) + 1e-9)
+
+    # ================================================================
+    # Assemble final feature vector  (43 dimensions)
+    # ================================================================
+    return np.concatenate([
+        il,                     # [ 0: 3]  3  left iris offset (head-local)
+        ir,                     # [ 3: 6]  3  right iris offset (head-local)
+        gaze_xy,                # [ 6: 8]  2  combined gaze x,y
+        [head_yaw, head_pitch, head_roll],  # [ 8:11]  3  head Euler
+        iris_socket_l,          # [11:13]  2  iris-in-socket L
+        iris_socket_r,          # [13:15]  2  iris-in-socket R
+        [ear_l],                # [15:16]  1  EAR left
+        [ear_r],                # [16:17]  1  EAR right
+        iris_ellipse_l,         # [17:19]  2  iris ellipse L
+        iris_ellipse_r,         # [19:21]  2  iris ellipse R
+        [vergence],             # [21:22]  1  vergence angle
+        [gaze_head_div],        # [22:23]  1  gaze-head divergence
+        [inter_iris_feat],      # [23:24]  1  inter-iris distance
+        hc_local_norm,          # [24:27]  3  head-centre (local)
+        [sr],                   # [27:28]  1  scale ratio
+        [face_ratio],           # [28:29]  1  face W/H ratio
+        [brow_h_l, brow_h_r],   # [29:31]  2  eyebrow heights
+        gaze_full_local,        # [31:34]  3  combined gaze full
+        lg_local,               # [34:37]  3  left gaze (local)
+        rg_local,               # [37:40]  3  right gaze (local)
+        sphere_sep_norm,        # [40:43]  3  sphere separation
+    ]).astype(float)
 
 
 def draw_calibration_overlay(frame, point_idx, pose_idx, settle_count, sample_count,
@@ -1144,21 +1529,54 @@ while cap.isOpened():
             # ==== COMPUTE COMBINED GAZE DIRECTION FOR SCREEN MAPPING ====
             # Calculate individual gaze directions
             left_gaze_dir = iris_3d_left - sphere_world_l
-            left_gaze_dir /= np.linalg.norm(left_gaze_dir)
+            left_gaze_norm = np.linalg.norm(left_gaze_dir)
+            left_gaze_dir /= (left_gaze_norm + 1e-9)
             
             right_gaze_dir = iris_3d_right - sphere_world_r
-            right_gaze_dir /= np.linalg.norm(right_gaze_dir)
+            right_gaze_norm = np.linalg.norm(right_gaze_dir)
+            right_gaze_dir /= (right_gaze_norm + 1e-9)
             
-            # Combine gaze directions (average)
-            raw_combined_direction = (left_gaze_dir + right_gaze_dir) / 2
-            raw_combined_direction /= np.linalg.norm(raw_combined_direction)
+            # Per-eye confidence weighting using Eye Aspect Ratio (EAR)
+            # Eyes that are more open provide more reliable iris tracking
+            def _compute_ear_quick(upper_idxs, lower_idxs, inner_idx, outer_idx, fl, fw_, fh_):
+                upper_pts = [np.array([fl[i].x * fw_, fl[i].y * fh_, fl[i].z * fw_]) for i in upper_idxs]
+                lower_pts = [np.array([fl[i].x * fw_, fl[i].y * fh_, fl[i].z * fw_]) for i in lower_idxs]
+                vert_sum = sum(np.linalg.norm(u - l) for u, l in zip(upper_pts, lower_pts))
+                horiz = np.linalg.norm(
+                    np.array([fl[outer_idx].x * fw_, fl[outer_idx].y * fh_, fl[outer_idx].z * fw_]) -
+                    np.array([fl[inner_idx].x * fw_, fl[inner_idx].y * fh_, fl[inner_idx].z * fw_])
+                ) + 1e-9
+                return vert_sum / (2.0 * horiz)
+
+            ear_left  = _compute_ear_quick(LEFT_UPPER_LID, LEFT_LOWER_LID,
+                                           LEFT_EYE_INNER, LEFT_EYE_OUTER, face_landmarks, w, h)
+            ear_right = _compute_ear_quick(RIGHT_UPPER_LID, RIGHT_LOWER_LID,
+                                           RIGHT_EYE_INNER, RIGHT_EYE_OUTER, face_landmarks, w, h)
+            # Weight: higher EAR = more open = more trustworthy
+            w_left  = max(ear_left, 0.05)
+            w_right = max(ear_right, 0.05)
+            total_w = w_left + w_right
+
+            # Weighted combine gaze directions
+            raw_combined_direction = (w_left * left_gaze_dir + w_right * right_gaze_dir) / total_w
+            raw_combined_direction /= (np.linalg.norm(raw_combined_direction) + 1e-9)
+
+            # Outlier rejection: if the direction changed too much from last frame, dampen it
+            if len(combined_gaze_directions) > 0:
+                last_dir = combined_gaze_directions[-1]
+                angle_change = np.arccos(np.clip(np.dot(raw_combined_direction, last_dir), -1.0, 1.0))
+                if angle_change > np.radians(15):  # sudden jump > 15 degrees
+                    # Blend towards last direction to reject outlier
+                    raw_combined_direction = 0.7 * last_dir + 0.3 * raw_combined_direction
+                    raw_combined_direction /= (np.linalg.norm(raw_combined_direction) + 1e-9)
 
             # Update direction buffer for smoothing
             combined_gaze_directions.append(raw_combined_direction)
 
-            # Smoothed direction
-            avg_combined_direction = np.mean(combined_gaze_directions, axis=0)
-            avg_combined_direction /= np.linalg.norm(avg_combined_direction)
+            # Apply 1-Euro filter for adaptive smoothing (low jitter + fast response)
+            t_now = time.time()
+            avg_combined_direction = gaze_dir_filter(raw_combined_direction, t_now)
+            avg_combined_direction /= (np.linalg.norm(avg_combined_direction) + 1e-9)
 
             combined_dir = avg_combined_direction
 
@@ -1168,7 +1586,12 @@ while cap.isOpened():
                 R_final,
                 iris_3d_left, iris_3d_right,
                 sphere_world_l, sphere_world_r,
-                head_center
+                head_center,
+                face_landmarks=face_landmarks,
+                frame_w=w, frame_h=h,
+                scale_ratio=scale_ratio,
+                left_gaze_dir=left_gaze_dir,
+                right_gaze_dir=right_gaze_dir,
             )
 
             # ==== CALIBRATION DATA COLLECTION ====
@@ -1189,8 +1612,9 @@ while cap.isOpened():
                     calib_sample_count += 1
 
                     if calib_sample_count >= CALIB_SAMPLES_PER_POINT:
-                        # Average features collected for this pose → one training row
-                        avg_feat = np.mean(calib_feat_buf, axis=0)
+                        # Median of features collected for this pose → one training row
+                        # (median is more robust to outlier frames than mean)
+                        avg_feat = np.median(calib_feat_buf, axis=0)
 
                         # Compute grid cell index as target label
                         nx, ny = CALIB_POINTS[calib_point_index]
@@ -1218,9 +1642,16 @@ while cap.isOpened():
                                 cv2.destroyWindow("Calibration")
                                 gaze_model.fit(calib_X, calib_Y)
                                 gaze_model.save()
-                                # Reset output smoothing
+                                # Reset output smoothing and filters
                                 smooth_probs = None
+                                prev_predicted_cell = None
+                                cell_hold_counter = 0
                                 model_feat_history.clear()
+                                # Reset 1-Euro filters for fresh start
+                                gaze_dir_filter = OneEuroFilter(freq=30.0, min_cutoff=0.8, beta=0.005, d_cutoff=1.0)
+                                feat_filter = OneEuroFilter(freq=30.0, min_cutoff=1.5, beta=0.01, d_cutoff=1.0)
+                                screen_filter_x = OneEuroFilter(freq=30.0, min_cutoff=0.5, beta=0.3, d_cutoff=1.0)
+                                screen_filter_y = OneEuroFilter(freq=30.0, min_cutoff=0.5, beta=0.3, d_cutoff=1.0)
                                 print("[Calibration] Complete. Model fitted and saved.")
 
             # ==== CONVERT GAZE TO GRID CELL ====
@@ -1230,29 +1661,51 @@ while cap.isOpened():
             cell_confidence = 0.0
 
             if gaze_model.fitted and not calib_mode:
-                # Smooth the feature vector over recent frames before predicting
+                # Smooth the feature vector with both deque average and 1-Euro filter
                 model_feat_history.append(feat.copy())
-                smooth_feat = np.mean(model_feat_history, axis=0)
+                deque_avg_feat = np.mean(model_feat_history, axis=0)
+                smooth_feat = feat_filter(deque_avg_feat, time.time())
 
                 pred = gaze_model.predict(smooth_feat)
                 if pred is not None:
                     cell_idx, conf, probs = pred
 
-                    # Exponential moving average on class probabilities
+                    # Adaptive exponential moving average on class probabilities
+                    # Use higher alpha (less smoothing) when confidence is high
+                    adaptive_alpha = prob_smooth_alpha * (0.5 + 0.5 * conf)
                     if smooth_probs is None:
                         smooth_probs = probs.copy()
                     else:
-                        smooth_probs = smooth_probs + prob_smooth_alpha * (probs - smooth_probs)
+                        smooth_probs = smooth_probs + adaptive_alpha * (probs - smooth_probs)
+                        # Re-normalise to ensure valid probability distribution
+                        smooth_probs = np.clip(smooth_probs, 0, None)
+                        smooth_probs /= (smooth_probs.sum() + 1e-12)
 
-                    predicted_cell = int(np.argmax(smooth_probs))
-                    cell_confidence = float(smooth_probs[predicted_cell])
-                    predicted_row = predicted_cell // OUTPUT_GRID_COLS
-                    predicted_col = predicted_cell % OUTPUT_GRID_COLS
+                    candidate_cell = int(np.argmax(smooth_probs))
+                    cell_confidence = float(smooth_probs[candidate_cell])
 
-                    # Map to cell centre pixel for optional mouse control
-                    cell_cx = int((predicted_col + 0.5) / OUTPUT_GRID_COLS * MONITOR_WIDTH)
-                    cell_cy = int((predicted_row + 0.5) / OUTPUT_GRID_ROWS * MONITOR_HEIGHT)
-                    screen_x, screen_y = cell_cx, cell_cy
+                    # Temporal consistency: require the same cell for N consecutive frames
+                    if candidate_cell == prev_predicted_cell:
+                        cell_hold_counter += 1
+                    else:
+                        cell_hold_counter = 1
+                        prev_predicted_cell = candidate_cell
+
+                    # Only switch prediction if held for enough frames OR high confidence
+                    if cell_hold_counter >= CELL_HOLD_THRESHOLD or cell_confidence > 0.7:
+                        predicted_cell = candidate_cell
+                    elif predicted_cell is None:
+                        predicted_cell = candidate_cell  # first frame
+
+                    if predicted_cell is not None:
+                        predicted_row = predicted_cell // OUTPUT_GRID_COLS
+                        predicted_col = predicted_cell % OUTPUT_GRID_COLS
+                        # Map to cell centre pixel for optional mouse control
+                        cell_cx = int((predicted_col + 0.5) / OUTPUT_GRID_COLS * MONITOR_WIDTH)
+                        cell_cy = int((predicted_row + 0.5) / OUTPUT_GRID_ROWS * MONITOR_HEIGHT)
+                        screen_x, screen_y = cell_cx, cell_cy
+                    else:
+                        screen_x, screen_y = CENTER_X, CENTER_Y
                 else:
                     screen_x, screen_y = CENTER_X, CENTER_Y
 
@@ -1445,7 +1898,12 @@ while cap.isOpened():
         calib_Y           = []
         calib_feat_buf    = []
         smooth_probs      = None
+        prev_predicted_cell = None
+        cell_hold_counter = 0
         model_feat_history.clear()
+        # Reset 1-Euro filters for clean calibration
+        gaze_dir_filter = OneEuroFilter(freq=30.0, min_cutoff=0.8, beta=0.005, d_cutoff=1.0)
+        feat_filter = OneEuroFilter(freq=30.0, min_cutoff=1.5, beta=0.01, d_cutoff=1.0)
         total = len(CALIB_POINTS)
         n_poses = len(CALIB_HEAD_POSES)
         print(f"[Calibration] Starting {total}-point x {n_poses}-pose calibration "
