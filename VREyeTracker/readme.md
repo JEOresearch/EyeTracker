@@ -1,6 +1,6 @@
 # Unity VR Gaze Visualizer and Calibration Script
 
-This Unity C# script visualizes a 3D gaze ray produced by my external Python eye tracker. The Python tracker continuously writes a gaze origin and gaze direction to a text file, and this Unity script reads that file in real time to display the gaze direction inside a VR headset.
+This Unity C# script visualizes a 3D gaze ray produced by my external Python eye tracker [Python Tracker Script](https://github.com/JEOresearch/EyeTracker/blob/main/3DTracker/Orlosky3DEyeTracker.py). The Python tracker continuously writes a gaze origin and gaze direction to a text file, and this Unity script reads that file in real time to display the gaze direction inside a VR headset.
 
 To help support this software and other open-source projects, please consider subscribing to my YouTube channel: https://www.youtube.com/@jeoresearch, or joining for $1 per month: https://www.youtube.com/@jeoresearch/join.
 
