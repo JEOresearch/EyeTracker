@@ -2,11 +2,8 @@ import cv2
 import random
 import math
 import numpy as np
-import os
 import tkinter as tk
 from tkinter import ttk, filedialog
-import sys
-import time
 
 try:
     import gl_sphere
@@ -15,17 +12,31 @@ except ImportError:
     GL_SPHERE_AVAILABLE = False
     print("gl_sphere module not found. OpenGL rendering will be disabled.")
 
-ray_lines = [] 
-model_centers = []
-max_rays = 100
-prev_model_center_avg = (320,240)
+ray_lines = []  # Store recent pupil ellipse rays
+model_centers = []  # Store recent estimated eye centers
+min_model_centers = 30  # Minimum model centers required before updating sphere radius
+max_rays = 100  # Limit the number of stored pupil rays
+prev_model_center_avg = (320,240)  # Preserve the last valid eye center
 max_observed_distance = 0  # Initialize adaptive radius
+last_sphere_radius_ellipse = None  # Last pupil ellipse used to expand the eye sphere radius
+pupil_confidence_threshold = 0.85  # Minimum pupil confidence for storing a ray
+pupil_confidence_threshold_sphere = 0.60  # Minimum pupil confidence for determining eye sphere radius
+intersection_ray_count = 4  # Rays sampled for each intersection estimate
+minimum_intersection_angle_degrees = 8  # Minimum angle between sampled rays
+last_tracking_result = None  # Store the latest tracker output
+
+capture_stuck_ellipses = False     # toggled with 'e'
+stuck_ellipses = []                # saved pupil ellipses
+capture_frame_counter = 0          # counts processed frames while capture is enabled
+ellipse_capture_interval = 5      # save one ellipse every 10 frames
+max_stuck_ellipses = 20           # safety cap
 
 # Function to detect available cameras
 def detect_cameras(max_cams=10):
     available_cameras = []
     for i in range(max_cams):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+        cap = cv2.VideoCapture(i, cv2.CAP_MSMF)
+        cap.set(cv2.CAP_PROP_FPS, 30)
         if cap.isOpened():
             available_cameras.append(i)
             cap.release()
@@ -115,11 +126,6 @@ def optimize_contours_by_angle(contours, image):
     # Calculate centroid of the original contours
     centroid = np.mean(all_contours, axis=0)
     
-    # Create an image of the same size as the original image
-    point_image = image.copy()
-    
-    skip = 0
-    
     # Loop through each point in the all_contours array
     for i in range(0, len(all_contours), 1):
     
@@ -131,11 +137,6 @@ def optimize_contours_by_angle(contours, image):
         # Calculate vectors between points
         vec1 = prev_point - current_point
         vec2 = next_point - current_point
-        
-        with np.errstate(invalid='ignore'):
-            # Calculate angles between vectors
-            angle = np.arccos(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
-
         
         # Calculate vector from current point to centroid
         vec_to_centroid = centroid - current_point
@@ -165,22 +166,32 @@ def filter_contours_by_area_and_return_largest(contours, pixel_thresh, ratio_thr
                     largest_contour = contour
 
     return [largest_contour] if largest_contour is not None else []
-#Fits an ellipse to the optimized contours and draws it on the image.
-def fit_and_draw_ellipses(image, optimized_contours, color):
-    if len(optimized_contours) >= 5:
-        # Ensure the data is in the correct shape (n, 1, 2) for cv2.fitEllipse
-        contour = np.array(optimized_contours, dtype=np.int32).reshape((-1, 1, 2))
 
-        # Fit ellipse
-        ellipse = cv2.fitEllipse(contour)
+def distance_to_pupil_outer_edge(eye_center, pupil_ellipse):
+    pupil_center, axes, angle_degrees = pupil_ellipse
+    direction_x = pupil_center[0] - eye_center[0]
+    direction_y = pupil_center[1] - eye_center[1]
+    center_distance = math.hypot(direction_x, direction_y)
 
-        # Draw the ellipse
-        cv2.ellipse(image, ellipse, color, 2)  # Draw with green color and thickness of 2
+    semi_axis_x = axes[0] / 2
+    semi_axis_y = axes[1] / 2
+    if center_distance == 0 or semi_axis_x <= 0 or semi_axis_y <= 0:
+        return None
 
-        return image
-    else:
-        print("Not enough points to fit an ellipse.")
-        return image
+    unit_x = direction_x / center_distance
+    unit_y = direction_y / center_distance
+    angle_radians = math.radians(angle_degrees)
+    cosine = math.cos(angle_radians)
+    sine = math.sin(angle_radians)
+
+    local_x = cosine * unit_x + sine * unit_y
+    local_y = -sine * unit_x + cosine * unit_y
+    edge_offset = 1 / math.sqrt(
+        (local_x / semi_axis_x) ** 2
+        + (local_y / semi_axis_y) ** 2
+    )
+
+    return center_distance + edge_offset
 
 #checks how many pixels in the contour fall under a slightly thickened ellipse
 #also returns that number of pixels divided by the total pixels on the contour border
@@ -219,7 +230,6 @@ def check_contour_pixels(contour, image_shape, debug_mode_on):
     
     return [absolute_pixel_total_thick, ratio_under_ellipse, overlap_thin]
 
-#outside of this method, select the ellipse with the highest percentage of pixels under the ellipse 
 #TODO for efficiency, work with downscaled or cropped images
 def check_ellipse_goodness(binary_image, contour, debug_mode_on):
     ellipse_goodness = [0,0,0] #covered pixels, edge straightness stdev, skewedness   
@@ -251,10 +261,6 @@ def check_ellipse_goodness(binary_image, contour, debug_mode_on):
     #percentage of covered pixels to number of pixels under area
     ellipse_goodness[0] = covered_pixels / ellipse_area
     
-    #skew of the ellipse (less skewed is better?) - may not need this
-    axes_lengths = ellipse[1]  # This is a tuple (minor_axis_length, major_axis_length)
-    major_axis_length = axes_lengths[1]
-    minor_axis_length = axes_lengths[0]
     ellipse_goodness[2] = min(ellipse[1][1]/ellipse[1][0], ellipse[1][0]/ellipse[1][1])
     
     return ellipse_goodness
@@ -265,70 +271,89 @@ def process_frames(thresholded_image_strict, thresholded_image_medium, threshold
     global max_rays
     global prev_model_center_avg
     global max_observed_distance
+    global last_sphere_radius_ellipse
+    global last_tracking_result
+    global capture_stuck_ellipses
+    global stuck_ellipses
+    global capture_frame_counter
+    global ellipse_capture_interval
+    global max_stuck_ellipses
 
     kernel_size = 5
     kernel = np.ones((kernel_size, kernel_size), np.uint8)
-
-    dilated_image = cv2.dilate(thresholded_image_medium, kernel, iterations=2)
-    contours, _ = cv2.findContours(dilated_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    reduced_contours = filter_contours_by_area_and_return_largest(contours, 1000, 3)
 
     final_rotated_rect = ((0,0),(0,0),0)
 
     image_array = [thresholded_image_relaxed, thresholded_image_medium, thresholded_image_strict] #holds images
     name_array = ["relaxed", "medium", "strict"] #for naming windows
-    final_image = image_array[0] #holds return array
     final_contours = [] #holds final contours
-    ellipse_reduced_contours = [] #holds an array of the best contour points from the fitting process
     goodness = 0 #goodness value for best ellipse
-    best_array = 0 
     kernel_size = 5  # Size of the kernel (5x5)
     kernel = np.ones((kernel_size, kernel_size), np.uint8)
     gray_copy1 = gray_frame.copy()
     gray_copy2 = gray_frame.copy()
     gray_copy3 = gray_frame.copy()
     gray_copies = [gray_copy1, gray_copy2, gray_copy3]
-    final_goodness = 0
-    
-    #iterate through binary images and see which fits the ellipse best
-    for i in range(1,4):
-        # Dilate the binary image
-        dilated_image = cv2.dilate(image_array[i-1], kernel, iterations=2)#medium
-        
-        # Find contours
-        contours, hierarchy = cv2.findContours(dilated_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Create an empty image to draw contours
-        contour_img2 = np.zeros_like(dilated_image)
+    final_goodness = 0
+    best_ratio_under_ellipse = 0
+    best_center_x, best_center_y = None, None
+
+    # iterate through binary images and see which fits the ellipse best
+    for i in range(1,4):
+        dilated_image = cv2.dilate(image_array[i-1], kernel, iterations=2)
+
+        contours, _ = cv2.findContours(
+            dilated_image,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
         reduced_contours = filter_contours_by_area_and_return_largest(contours, 1000, 3)
 
-        #initialize variables
         center_x, center_y = None, None
 
         if len(reduced_contours) > 0 and len(reduced_contours[0]) > 5:
-            current_goodness = check_ellipse_goodness(dilated_image, reduced_contours[0], debug_mode_on)
+            current_goodness = check_ellipse_goodness(
+                dilated_image,
+                reduced_contours[0],
+                debug_mode_on
+            )
+
             ellipse = cv2.fitEllipse(reduced_contours[0])
-            center_x, center_y = map(int, ellipse[0]) 
-            if debug_mode_on: #show contours 
+            center_x, center_y = map(int, ellipse[0])
+
+            if debug_mode_on:
                 cv2.imshow(name_array[i-1] + " threshold", gray_copies[i-1])
-                
-            #in total pixels, first element is pixel total, next is ratio
-            total_pixels = check_contour_pixels(reduced_contours[0], dilated_image.shape, debug_mode_on)                 
-            
-            cv2.ellipse(gray_copies[i-1], ellipse, (255, 0, 0), 2)  # Draw with specified color and thickness of 2
-            font = cv2.FONT_HERSHEY_SIMPLEX  # Font type
-            
-            final_goodness = current_goodness[0]*total_pixels[0]*total_pixels[0]*total_pixels[1]
 
-        if final_goodness > 0 and final_goodness > goodness: 
-            goodness = final_goodness
-            ellipse_reduced_contours = total_pixels[2]
-            best_image = image_array[i-1]
-            final_contours = reduced_contours
-            final_image = dilated_image
+            total_pixels = check_contour_pixels(
+                reduced_contours[0],
+                dilated_image.shape,
+                debug_mode_on
+            )
 
-    test_frame = frame.copy()
-    
+            cv2.ellipse(gray_copies[i-1], ellipse, (255, 0, 0), 2)
+
+            final_goodness = (
+                current_goodness[0]
+                * total_pixels[0]
+                * total_pixels[0]
+                * total_pixels[1]
+            )
+
+            if final_goodness > 0 and final_goodness > goodness:
+                goodness = final_goodness
+                best_ratio_under_ellipse = total_pixels[1]
+                final_contours = reduced_contours
+
+                # Keep the pupil center associated with the chosen contour.
+                best_center_x = center_x
+                best_center_y = center_y
+
+    # After threshold selection, use the center from the chosen/best contour.
+    center_x = best_center_x
+    center_y = best_center_y
+
     final_contours = [optimize_contours_by_angle(final_contours, gray_frame)]
     
     final_rotated_rect = None
@@ -337,17 +362,22 @@ def process_frames(thresholded_image_strict, thresholded_image_medium, threshold
         ellipse = cv2.fitEllipse(final_contours[0])
         final_rotated_rect = ellipse
 
-        # Store the new ray in the list
-        ray_lines.append(final_rotated_rect)
-        # **Prune rays if list exceeds max_rays**
-        if len(ray_lines) > max_rays:
-            num_to_remove = len(ray_lines) - max_rays
-            ray_lines = ray_lines[num_to_remove:]  # Keep only the last `max_rays` elements
+        if best_ratio_under_ellipse >= pupil_confidence_threshold:
+            ray_lines.append(final_rotated_rect)
+            if len(ray_lines) > max_rays:
+                num_to_remove = len(ray_lines) - max_rays
+                ray_lines = ray_lines[num_to_remove:]  # Keep only the last `max_rays` elements
 
     model_center_average = (320,240)
 
-    model_center = compute_average_intersection(frame, ray_lines, 5, 1500, 5)
-    if model_center is not None:
+    model_center = compute_average_intersection(
+        frame,
+        ray_lines,
+        intersection_ray_count,
+        1500,
+        minimum_intersection_angle_degrees,
+    )
+    if model_center is not None and model_center != (0, 0):
         model_center_average = update_and_average_point(model_centers, model_center, 200)
 
     if model_center_average[0] == 320:
@@ -357,26 +387,56 @@ def process_frames(thresholded_image_strict, thresholded_image_medium, threshold
     
     # Example safety check
     if center_x is None or center_y is None or model_center_average[0] is None or model_center_average[1] is None:
+        last_tracking_result = None
         return  # or skip this frame
 
-    # Calculate the distance only if model_centers has at least 100 values
-    if len(model_centers) >= 100 and center_x is not None:
-        distance = math.sqrt((center_x - model_center_average[0]) ** 2 + (center_y - model_center_average[1]) ** 2)
-        if distance > max_observed_distance:
-            max_observed_distance = distance
-            
-    max_observed_distance = 202
+    if (
+        final_rotated_rect is not None
+        and best_ratio_under_ellipse >= pupil_confidence_threshold_sphere
+        and len(model_centers) >= min_model_centers
+    ):
+        outer_edge_distance = distance_to_pupil_outer_edge(
+            model_center_average,
+            final_rotated_rect,
+        )
+        if (
+            outer_edge_distance is not None
+            and outer_edge_distance > max_observed_distance
+        ):
+            max_observed_distance = outer_edge_distance
+            last_sphere_radius_ellipse = final_rotated_rect
+
+    last_tracking_result = {
+        "pupil_ellipse": {
+            "center": [float(final_rotated_rect[0][0]), float(final_rotated_rect[0][1])] if final_rotated_rect is not None else None,
+            "axes": [float(final_rotated_rect[1][0]), float(final_rotated_rect[1][1])] if final_rotated_rect is not None else None,
+            "angle_degrees": float(final_rotated_rect[2]) if final_rotated_rect is not None else None,
+        } if final_rotated_rect is not None else None,
+        "eye_center": [int(model_center_average[0]), int(model_center_average[1])],
+        "sphere_radius": float(max_observed_distance),
+    }
 
     # Draw reference lines/ellipses
     cv2.circle(frame, model_center_average, int(max_observed_distance), (255, 50, 50), 2)  # Draw eye sphere (circle)
     cv2.circle(frame, model_center_average, 8, (255, 255, 0), -1)  # Draw eye center
-
-
-
     if final_rotated_rect is not None and center_x is not None and center_y is not None:
         cv2.line(frame, model_center_average, (center_x, center_y), (255, 150, 50), 2)  # # Draw line from eye center to ellipse center
         
-    cv2.ellipse(frame, final_rotated_rect, (20, 255, 255), 2) #draw final ellipse on image
+    if final_rotated_rect is not None:
+        cv2.ellipse(frame, final_rotated_rect, (20, 255, 255), 2)  # draw current ellipse
+
+        # If capture mode is on, save one ellipse every N frames
+        if capture_stuck_ellipses:
+            capture_frame_counter += 1
+            if capture_frame_counter % ellipse_capture_interval == 0:
+                stuck_ellipses.append(final_rotated_rect)
+
+                # safety cap so list does not grow forever
+                if len(stuck_ellipses) > max_stuck_ellipses:
+                    stuck_ellipses = stuck_ellipses[-max_stuck_ellipses:]
+
+    # Draw previously saved ellipses so they stay "stuck" on screen
+        draw_stuck_ellipses(frame)
 
     # Calculate the extended endpoint of gaze line
     if final_rotated_rect is not None and center_x is not None and center_y is not None:
@@ -428,6 +488,10 @@ def process_frames(thresholded_image_strict, thresholded_image_medium, threshold
     else:
         print("No valid intersection found.")
 
+    ratio_text = f"{best_ratio_under_ellipse * 100:.2f}%"
+    cv2.putText(frame, ratio_text, (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4)
+    cv2.putText(frame, ratio_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
     cv2.imshow("Frame with Ellipse and Rays", frame)
 
     if GL_SPHERE_AVAILABLE:
@@ -436,6 +500,30 @@ def process_frames(thresholded_image_strict, thresholded_image_medium, threshold
             cv2.imshow("Eye Tracker + Sphere", blended)
 
     return final_rotated_rect
+
+def reset_tracking_state():
+    global ray_lines
+    global model_centers
+    global prev_model_center_avg
+    global max_observed_distance
+    global last_sphere_radius_ellipse
+    global stored_intersections
+    global capture_frame_counter
+    global stuck_ellipses
+    global last_tracking_result
+
+    ray_lines = []
+    model_centers = []
+    prev_model_center_avg = (320, 240)
+    max_observed_distance = 0
+    last_sphere_radius_ellipse = None
+    stored_intersections = []
+    capture_frame_counter = 0
+    stuck_ellipses = []
+    last_tracking_result = None
+
+def get_last_tracking_result():
+    return last_tracking_result
 
 def update_and_average_point(point_list, new_point, N):
     """
@@ -464,104 +552,83 @@ def update_and_average_point(point_list, new_point, N):
 
     return (avg_x, avg_y)
 
-def draw_orthogonal_ray(image, ellipse, length=100, color=(0, 255, 0), thickness=1):
-    """
-    Draws a ray passing through the center of an ellipse orthogonally to its major axis.
-    
-    Parameters:
-    - image: The OpenCV image to draw on.
-    - ellipse: A tuple ((cx, cy), (major_axis, minor_axis), angle) representing the fitted ellipse.
-    - length: Length of the ray to draw on each side of the ellipse center.
-    - color: Color of the line in BGR format (default: green).
-    - thickness: Thickness of the line (default: 2).
-    """
-
-    (cx, cy), (major_axis, minor_axis), angle = ellipse
-    
-    # Convert angle to radians
-    angle_rad = np.deg2rad(angle)
-    
-    # Compute the normal vector at the ellipse center (perpendicular to surface)
-    normal_dx = (minor_axis / 2) * np.cos(angle_rad)  # Minor axis component
-    normal_dy = (minor_axis / 2) * np.sin(angle_rad)
-
-    # Compute start and end points of the orthogonal ray
-    pt1 = (int(cx - length * normal_dx / (minor_axis / 2)), int(cy - length * normal_dy / (minor_axis / 2)))
-    pt2 = (int(cx + length * normal_dx / (minor_axis / 2)), int(cy + length * normal_dy / (minor_axis / 2)))
-
-    # Draw the ray
-    cv2.line(image, pt1, pt2, color, thickness)
-
-    return image 
-
 stored_intersections = []  # Stores all past intersections
 
-def compute_average_intersection(frame, ray_lines, N, M, spacing):
+def compute_average_intersection(frame, ray_lines, number_lines, total_lines, minimum_angle_degrees):
     """
-    Selects N random lines from the list, highlights them in red on the frame,
-    computes their intersections, stores them, and prunes stored intersections when exceeding M.
-
-    Parameters:
-    - frame: The OpenCV frame to draw on.
-    - ray_lines: List of ellipse tuples ((cx, cy), (major_axis, minor_axis), angle).
-    - N: Number of random lines to select for intersection calculation.
-    - M: Maximum number of stored intersections before pruning.
-
-    Returns:
-    - (avg_x, avg_y): Average intersection point of selected lines.
+    Selects `number_lines` random lines from the list, computes their intersections,
+    conditionally stores them (only if they agree within `pixel_limit`), and prunes
+    stored intersections when exceeding `total_lines`.
     """
+    pixel_limit = 30
+    angle_threshold = 5  # degrees
+
     global stored_intersections
 
-    if len(ray_lines) < 2 or N < 2:
-        return (0, 0)  # Need at least 2 lines to find intersections
+    if len(ray_lines) < 2 or number_lines < 2:
+        return (0, 0)
 
-    # Get frame dimensions dynamically
     height, width = frame.shape[:2]
 
-    # Select N unique random lines
-    selected_lines = random.sample(ray_lines, min(N, len(ray_lines)))
+    selected_lines = random.sample(ray_lines, min(number_lines, len(ray_lines)))
 
     intersections = []
-
-    # Highlight selected rays in red
-    #for ray in selected_lines:
-    #    draw_orthogonal_ray(frame, ray, color=(0, 0, 255), thickness=2)  # Red lines
-
-    # Compute intersections for each pair of selected lines
     for i in range(len(selected_lines) - 1):
         line1 = selected_lines[i]
         line2 = selected_lines[i + 1]
 
-        angle1 = line1[2]  # Extract angle from ellipse tuple
-        angle2 = line2[2]  # Extract angle from ellipse tuple
+        angle1 = line1[2]
+        angle2 = line2[2]
 
-        if abs(angle1 - angle2) >= 2:  # Ensure lines differ by at least 2 degrees
+        if abs(angle1 - angle2) >= minimum_angle_degrees:
             intersection = find_line_intersection(line1, line2)
-            
-            # Ensure the intersection is within the frame bounds before adding
             if intersection and (0 <= intersection[0] < width) and (0 <= intersection[1] < height):
                 intersections.append(intersection)
-                stored_intersections.append(intersection)  # Store valid intersections
-        #else:
-        #    print(f"Skipped intersection: Angle difference too small ({abs(angle1 - angle2):.2f}°)")
 
-    # Prune intersections if stored list exceeds M
-    if len(stored_intersections) > M:
-        stored_intersections = prune_intersections(stored_intersections, M)
-
-    # Draw all stored intersections on the frame
-    #for pt in stored_intersections:
-    #    cv2.circle(frame, pt, 3, (255, 255, 255), -1)  # White dot for every past intersection
-
+    # Nothing usable this frame
     if not intersections:
-        return None  # No valid intersections found
+        return (0, 0)
 
-    # Compute the average intersection point
+    # Check mutual agreement within pixel_limit
+    accept = True
+    if len(intersections) >= 2:
+        for i in range(len(intersections)):
+            for j in range(i + 1, len(intersections)):
+                # --- distance check ---
+                dx = intersections[i][0] - intersections[j][0]
+                dy = intersections[i][1] - intersections[j][1]
+                if (dx * dx + dy * dy) ** 0.5 > pixel_limit:
+                    accept = False
+                    break
+
+                # --- angle check ---
+                angle_i = selected_lines[i][2]
+                angle_j = selected_lines[j][2]
+                if abs(angle_i - angle_j) < angle_threshold:
+                    accept = False
+                    break
+            if not accept:
+                break
+
+    if accept:
+        stored_intersections.extend(intersections)
+
+    # Prune stored intersections
+    if len(stored_intersections) > total_lines:
+        stored_intersections = prune_intersections(stored_intersections, total_lines)
+
+    if not stored_intersections:
+        return (0, 0)
+
     avg_x = np.mean([pt[0] for pt in stored_intersections])
     avg_y = np.mean([pt[1] for pt in stored_intersections])
 
+    if np.isnan(avg_x) or np.isnan(avg_y):
+        return (0, 0)
 
     return (int(avg_x), int(avg_y))
+
+
 
 #Removes the oldest intersections to ensure only the last M intersections remain.
 def prune_intersections(intersections, maximum_intersections):
@@ -690,24 +757,8 @@ def compute_gaze_vector(x, y, center_x, center_y, screen_width=640, screen_heigh
         if t is None:
             return None, None
 
-    sqrt_disc = np.sqrt(discriminant)
-    t1 = (-b - sqrt_disc) / (2 * a)
-    t2 = (-b + sqrt_disc) / (2 * a)
-
-    t = None
-    if t1 > 0 and t2 > 0:
-        t = min(t1, t2)
-    elif t1 > 0:
-        t = t1
-    elif t2 > 0:
-        t = t2
-    if t is None:
-        return None, None
-
     # Final intersection point
     intersection_point = origin + t * direction
-
-    # Convert to local space relative to sphere center
     intersection_local = intersection_point - sphere_center
     target_direction = intersection_local / np.linalg.norm(intersection_local)
 
@@ -759,6 +810,7 @@ def compute_gaze_vector(x, y, center_x, center_y, screen_width=640, screen_heigh
                 all_values = np.concatenate((sphere_center, gaze_rotated))
                 csv_line = ",".join(f"{v:.6f}" for v in all_values)
                 f.write(csv_line + "\n")
+                print("wrote to file")
         except Exception as e:
             print("Write error:", e)
     else:
@@ -766,8 +818,16 @@ def compute_gaze_vector(x, y, center_x, center_y, screen_width=640, screen_heigh
 
     return sphere_center, gaze_rotated
 
+def draw_stuck_ellipses(frame):
+    global stuck_ellipses
+
+    for ellipse in stuck_ellipses:
+        if ellipse is not None:
+            cv2.ellipse(frame, ellipse,(0, 255, 255), 2)
+
 # Finds the pupil in an individual frame and returns the center point
 def process_frame(frame):
+
 
     # Crop and resize frame
     frame = crop_to_aspect_ratio(frame)
@@ -799,10 +859,13 @@ def process_frame(frame):
 # Process video from the selected camera
 def process_camera():
     global selected_camera
+    global capture_stuck_ellipses
+    global capture_frame_counter
+    global stuck_ellipses
+
     cam_index = int(selected_camera.get())
 
-    cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
-    cap.set(cv2.CAP_PROP_EXPOSURE, -6)
+    cap = cv2.VideoCapture(cam_index, cv2.CAP_MSMF)
 
     if not cap.isOpened():
         print("Error: Could not open camera.")
@@ -813,6 +876,8 @@ def process_camera():
         if not ret:
             break
 
+        cv2.imshow("ORiginal Frame", frame)
+
         frame = cv2.flip(frame, 0)
         process_frame(frame)
 
@@ -821,6 +886,13 @@ def process_camera():
             break
         elif key == ord(' '):
             cv2.waitKey(0)
+        elif key == ord('e'):
+            capture_stuck_ellipses = not capture_stuck_ellipses
+            capture_frame_counter = 0
+            print(f"Ellipse capture mode: {'ON' if capture_stuck_ellipses else 'OFF'}")
+        elif key == ord('c'):
+            stuck_ellipses.clear()
+            print("Cleared stuck ellipses.")
 
     cap.release()
     cv2.destroyAllWindows()
