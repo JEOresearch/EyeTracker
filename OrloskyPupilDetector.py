@@ -2,10 +2,14 @@ import cv2
 import numpy as np
 import random
 import math
+import sys
 import tkinter as tk
 import os
 from tkinter import filedialog
-import matplotlib.pyplot as plt
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
 
 # Crop the image to maintain a specific aspect ratio (width:height) before resizing. 
 def crop_to_aspect_ratio(image, width=640, height=480):
@@ -30,8 +34,9 @@ def crop_to_aspect_ratio(image, width=640, height=480):
 
 #apply thresholding to an image
 def apply_binary_threshold(image, darkestPixelValue, addedThreshold):
-    # Calculate the threshold as the sum of the two input values
-    threshold = darkestPixelValue + addedThreshold
+    # Cast to int so uint8 pixel values do not wrap when adding the offset.
+    threshold = int(darkestPixelValue) + int(addedThreshold)
+    threshold = max(0, min(255, threshold))
     # Apply the binary threshold
     _, thresholded_image = cv2.threshold(image, threshold, 255, cv2.THRESH_BINARY_INV)
     
@@ -57,7 +62,7 @@ def get_darkest_area(image):
     for y in range(ignoreBounds, gray.shape[0] - ignoreBounds, imageSkipSize):
         for x in range(ignoreBounds, gray.shape[1] - ignoreBounds, imageSkipSize):
             # Calculate sum of pixel values in the search area, skipping pixels based on internalSkipSize
-            current_sum = np.int64(0)
+            current_sum = 0
             num_pixels = 0
             for dy in range(0, searchArea, internalSkipSize):
                 if y + dy >= gray.shape[0]:
@@ -65,7 +70,7 @@ def get_darkest_area(image):
                 for dx in range(0, searchArea, internalSkipSize):
                     if x + dx >= gray.shape[1]:
                         break
-                    current_sum += gray[y + dy][x + dx]
+                    current_sum += int(gray[y + dy, x + dx])
                     num_pixels += 1
 
             # Update the darkest point if the current block is darker
@@ -346,7 +351,7 @@ def process_frames(thresholded_image_strict, thresholded_image_medium, threshold
     
     final_contours = [optimize_contours_by_angle(final_contours, gray_frame)]
     
-    if final_contours and not isinstance(final_contours[0], list) and len(final_contours[0] > 5):
+    if final_contours and not isinstance(final_contours[0], list) and len(final_contours[0]) > 5:
         #cv2.drawContours(test_frame, final_contours, -1, (255, 255, 255), 1)
         ellipse = cv2.fitEllipse(final_contours[0])
         final_rotated_rect = ellipse
@@ -406,12 +411,15 @@ def process_frame(frame):
 def process_video(video_path, input_method):
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Codec for MP4 format
-    out = cv2.VideoWriter('C:/Storage/Source Videos/output_video.mp4', fourcc, 30.0, (640, 480))  # Output video filename, codec, frame rate, and frame size
+    output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output_video.mp4")
+    out = cv2.VideoWriter(output_path, fourcc, 30.0, (640, 480))  # Output next to this script
 
     if input_method == 1:
         cap = cv2.VideoCapture(video_path)
     elif input_method == 2:
-        cap = cv2.VideoCapture(00, cv2.CAP_DSHOW)  # Camera input
+        # Prefer a cross-platform backend; CAP_DSHOW is Windows-only.
+        backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+        cap = cv2.VideoCapture(0, backend)  # Camera input
         cap.set(cv2.CAP_PROP_EXPOSURE, -5)
     else:
         print("Invalid video source.")
@@ -435,6 +443,8 @@ def process_video(video_path, input_method):
 
         #find the darkest point
         darkest_point = get_darkest_area(frame)
+        if darkest_point is None:
+            continue
 
         if debug_mode_on:
             darkest_image = frame.copy()
@@ -443,7 +453,7 @@ def process_video(video_path, input_method):
 
         # Convert to grayscale to handle pixel value operations
         gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        darkest_pixel_value = gray_frame[darkest_point[1], darkest_point[0]]
+        darkest_pixel_value = int(gray_frame[darkest_point[1], darkest_point[0]])
         
         # apply thresholding operations at different levels
         # at least one should give us a good ellipse segment
@@ -481,15 +491,19 @@ def process_video(video_path, input_method):
     out.release()
     cv2.destroyAllWindows()
 
-#Prompts the user to select a video file if the hardcoded path is not found
-#This is just for my debugging convenience :)
+#Prompts the user to select a video file if no local sample is found
 def select_video():
     root = tk.Tk()
     root.withdraw()  # Hide the main window
-    video_path = 'C:/Google Drive/Eye Tracking/fulleyetest.mp4'
-    if not os.path.exists(video_path):
-        print("No file found at hardcoded path. Please select a video file.")
-        video_path = filedialog.askopenfilename(title="Select Video File", filetypes=[("Video Files", "*.mp4;*.avi")])
+    # Prefer the included sample clip, then fall back to a file picker.
+    candidate_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "eye_test.mp4"),
+        "eye_test.mp4",
+    ]
+    video_path = next((path for path in candidate_paths if os.path.exists(path)), None)
+    if video_path is None:
+        print("No local eye_test.mp4 found. Please select a video file.")
+        video_path = filedialog.askopenfilename(title="Select Video File", filetypes=[("Video Files", "*.mp4 *.avi"), ("All files", "*.*")])
         if not video_path:
             print("No file selected. Exiting.")
             return

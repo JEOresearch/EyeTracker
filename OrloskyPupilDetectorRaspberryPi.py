@@ -23,7 +23,9 @@ def crop_to_aspect_ratio(image, width=640, height=480):
     
 # Apply thresholding to an image
 def apply_binary_threshold(image, darkestPixelValue, addedThreshold):
-    threshold = darkestPixelValue + addedThreshold
+    # Cast to int so uint8 pixel values do not wrap when adding the offset.
+    threshold = int(darkestPixelValue) + int(addedThreshold)
+    threshold = max(0, min(255, threshold))
     _, thresholded_image = cv2.threshold(image, threshold, 255, cv2.THRESH_BINARY_INV)
     return thresholded_image
 
@@ -48,7 +50,7 @@ def get_darkest_area(image):
                 for dx in range(0, searchArea, internalSkipSize):
                     if x + dx >= gray.shape[1]:
                         break
-                    current_sum += gray[y + dy][x + dx]
+                    current_sum += int(gray[y + dy, x + dx])
                     num_pixels += 1
 
             if current_sum < min_sum and num_pixels > 0:

@@ -51,13 +51,38 @@ circle_x = EXT_CX
 circle_y = EXT_CY
 
 
+CAMERA_CAPTURE_MODES = (
+    (
+        ("MSMF", cv2.CAP_MSMF, None),
+        ("DirectShow + XVID", cv2.CAP_DSHOW, "XVID"),
+    )
+    if sys.platform == "win32"
+    else (("Auto", cv2.CAP_ANY, None),)
+)
+
+def open_camera_capture(cam_index, start_mode=0):
+    for mode_index in range(start_mode, len(CAMERA_CAPTURE_MODES)):
+        mode_name, backend, fourcc = CAMERA_CAPTURE_MODES[mode_index]
+        cap = cv2.VideoCapture(cam_index, backend)
+        if fourcc is not None:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        ret, _ = cap.read() if cap.isOpened() else (False, None)
+
+        if ret:
+            return cap, mode_index
+
+        cap.release()
+        print(f"Could not grab a frame from camera {cam_index} with {mode_name}.")
+
+    return None, None
+
 # Function to detect available cameras
 def detect_cameras(max_cams=10):
     available_cameras = []
     for i in range(max_cams):
-        cap = cv2.VideoCapture(i, cv2.CAP_MSMF)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-        if cap.isOpened():
+        cap, _ = open_camera_capture(i)
+        if cap is not None:
             available_cameras.append(i)
             cap.release()
     return available_cameras
@@ -83,7 +108,9 @@ def crop_to_aspect_ratio(image, width=640, height=480):
 
 # Apply thresholding to an image
 def apply_binary_threshold(image, darkestPixelValue, addedThreshold):
-    threshold = darkestPixelValue + addedThreshold
+    # Cast to int so uint8 pixel values do not wrap when adding the offset.
+    threshold = int(darkestPixelValue) + int(addedThreshold)
+    threshold = max(0, min(255, threshold))
     _, thresholded_image = cv2.threshold(image, threshold, 255, cv2.THRESH_BINARY_INV)
     return thresholded_image
 
@@ -108,7 +135,7 @@ def get_darkest_area(image):
                 for dx in range(0, searchArea, internalSkipSize):
                     if x + dx >= gray.shape[1]:
                         break
-                    current_sum += gray[y + dy][x + dx]
+                    current_sum += int(gray[y + dy, x + dx])
                     num_pixels += 1
 
             if current_sum < min_sum and num_pixels > 0:
@@ -364,7 +391,7 @@ def process_frames(thresholded_image_strict, thresholded_image_medium, threshold
     
     final_rotated_rect = None
 
-    if final_contours and not isinstance(final_contours[0], list) and len(final_contours[0] > 5):
+    if final_contours and not isinstance(final_contours[0], list) and len(final_contours[0]) > 5:
         ellipse = cv2.fitEllipse(final_contours[0])
         final_rotated_rect = ellipse
 
@@ -951,10 +978,12 @@ def process_frame(frame):
 
     #find the darkest point
     darkest_point = get_darkest_area(frame)
+    if darkest_point is None:
+        return None
 
     # Convert to grayscale to handle pixel value operations
     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    darkest_pixel_value = gray_frame[darkest_point[1], darkest_point[0]]
+    darkest_pixel_value = int(gray_frame[darkest_point[1], darkest_point[0]])
     
     # apply thresholding operations at different levels
     # at least one should give us a good ellipse segment
@@ -980,19 +1009,23 @@ def process_camera():
     cam_index = int(selected_camera.get())
 
     # ---- Eye camera (existing) ----
-    eye_cap = cv2.VideoCapture(0, cv2.CAP_MSMF)
-    if not eye_cap.isOpened():
-        print(f"Error: Could not open eye camera at index {cam_index}.")
+    eye_cap, eye_mode = open_camera_capture(0)
+    if eye_cap is None:
+        print("Error: Could not open eye camera at index 0.")
         return
+    print(f"Eye camera opened with {CAMERA_CAPTURE_MODES[eye_mode][0]}.")
 
     # ---- External camera (new) ----
     external_index = cam_index   # adjust if needed
-    external_cap = cv2.VideoCapture(1, cv2.CAP_MSMF)
+    external_cap, external_mode = open_camera_capture(external_index)
 
-    if external_cap.isOpened():
+    if external_cap is not None:
         external_cap.set(cv2.CAP_PROP_FRAME_WIDTH, EXT_WIDTH)
         external_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, EXT_HEIGHT)
-        print(f"External camera opened at index {external_index} ({EXT_WIDTH}x{EXT_HEIGHT}).")
+        print(
+            f"External camera opened at index {external_index} "
+            f"({EXT_WIDTH}x{EXT_HEIGHT}) with {CAMERA_CAPTURE_MODES[external_mode][0]}."
+        )
     else:
         print(f"Warning: Could not open external camera at index {external_index}.")
         external_cap = None
@@ -1055,7 +1088,7 @@ def process_camera():
 
 # Process a selected video file
 def process_video():
-    video_path = filedialog.askopenfilename(filetypes=[("Video Files", "*.mp4;*.avi")])
+    video_path = filedialog.askopenfilename(filetypes=[("Video Files", "*.mp4 *.avi"), ("All files", "*.*")])
 
     if not video_path:
         return  # User canceled selection

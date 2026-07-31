@@ -7,7 +7,6 @@ import math
 import threading
 import time
 import subprocess
-import keyboard
 
 MONITOR_WIDTH, MONITOR_HEIGHT = pyautogui.size()
 CENTER_X = MONITOR_WIDTH // 2
@@ -257,14 +256,13 @@ while cap.isOpened():
     cv2.imshow("Head-Aligned Cube", frame)
     cv2.imshow("Facial Landmarks", landmarks_frame)
 
-    if keyboard.is_pressed('f7'):
+    # Use OpenCV key events instead of the `keyboard` package (root/permissions issues on Linux/macOS).
+    key = cv2.waitKey(1) & 0xFF
+    if key in (ord('m'), ord('M'), ord('f'), ord('F'), ord('7')):
         mouse_control_enabled = not mouse_control_enabled
         print(f"[Mouse Control] {'Enabled' if mouse_control_enabled else 'Disabled'}")
-        time.sleep(0.3)  # debounce to prevent rapid toggling
-
-
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'):
+        time.sleep(0.2)  # debounce to prevent rapid toggling
+    elif key == ord('q'):
         break
     elif key == ord('c'):
         calibration_offset_yaw = 180 - raw_yaw_deg

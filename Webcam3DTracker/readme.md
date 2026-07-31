@@ -30,13 +30,24 @@ Windows will open showing:
 Interactive controls:
 -----
 - c = calibrate (screen center)
-- F7 = toggle mouse control (disabled by default)
+- m (or 7) = toggle mouse control (disabled by default)
 - j/l = orbit yaw left/right
 - i/k = orbit pitch up/down
 - [ / ] = zoom orbit view out/in
 - r = reset orbit view
 - x = stamp a green marker on the monitor where your gaze hits
 - q = quit
+
+Hotkeys use OpenCV window focus (`cv2.waitKey`), so the `keyboard` package is not required
+(and no root privileges are needed on Linux/macOS).
+
+Install
+-----
+```bash
+pip install -r requirements.txt
+```
+
+`screen_position.txt` is written next to `MonitorTracking.py` (portable across OSes).
 
 Notes
 -----
@@ -47,4 +58,5 @@ Troubleshooting
 -----
 - If gaze appears jittery, increase filter_length.
 - If the wrong camera opens, change cv2.VideoCapture(0) to another index.
+- If MediaPipe fails after install, pin an older build: `pip install "mediapipe>=0.10.5,<0.10.15"`.
 - For better accuracy, use consistent lighting and this webcam: https://amzn.to/43of401.
