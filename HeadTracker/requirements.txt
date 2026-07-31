@@ -1,0 +1,7 @@
+opencv-python
+numpy
+# MediaPipe solutions.face_mesh is used by MonitorTracking.py.
+# Pin below the Tasks-API-only transition so installs stay compatible.
+mediapipe>=0.10.5,<0.10.15
+pyautogui
+PyQt5

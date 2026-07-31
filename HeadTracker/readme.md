@@ -13,14 +13,14 @@ REQUIREMENTS
 ------------
 - Python 3.x
 - OpenCV
-- MediaPipe
+- MediaPipe (`>=0.10.5,<0.10.15` — needed for the `solutions.face_mesh` API used here)
 - NumPy
 - PyAutoGUI
-- Keyboard
+- PyQt5 (optional, for CursorCircle.py)
 
 To install the required packages:
 ```bash
-    pip install opencv-python mediapipe numpy pyautogui keyboard
+    pip install -r requirements.txt
 ```
 
 USAGE
@@ -43,9 +43,11 @@ FEATURES
 - Real-time head pose estimation.
 - Virtual wireframe cube aligned to your head orientation.
 - Mouse control mapped to yaw and pitch angle from your face.
-- Press F7 to toggle mouse control on/off.
+- Press **m** (or **f** / **7**) to toggle mouse control on/off.
 - Press 'c' to calibrate when looking straight at your monitor center.
 - Press 'q' to quit the application.
+
+Note: Hotkeys use OpenCV window focus (`cv2.waitKey`), so no root/`keyboard` package is required on Linux or macOS.
 
 NOTES
 -----

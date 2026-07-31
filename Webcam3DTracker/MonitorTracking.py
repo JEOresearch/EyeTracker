@@ -8,7 +8,6 @@ from scipy.spatial.transform import Rotation as Rscipy
 from collections import deque
 import pyautogui
 import threading
-import keyboard
 
 # Screen and mouse control setup (from old script)
 MONITOR_WIDTH, MONITOR_HEIGHT = pyautogui.size()
@@ -80,13 +79,17 @@ nose_indices = [4, 45, 275, 220, 440, 1, 5, 51, 281, 44, 274, 241,
                 461, 125, 354, 218, 438, 195, 167, 393, 165, 391,
                 3, 248]
 
-# ===== NEW: File writing for screen position =====
-screen_position_file = "C:/Storage/Google Drive/Software/EyeTracker3DPython/screen_position.txt"
+# ===== File writing for screen position =====
+# Use a project-local path so this works on Windows, macOS, and Linux.
+screen_position_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screen_position.txt")
 
 def write_screen_position(x, y):
     """Write screen position to file, overwriting the same line"""
-    with open(screen_position_file, 'w') as f:
-        f.write(f"{x},{y}\n")
+    try:
+        with open(screen_position_file, 'w') as f:
+            f.write(f"{x},{y}\n")
+    except OSError as e:
+        print(f"Could not write screen position to {screen_position_file}: {e}")
 
 def _rot_x(a):
     ca, sa = math.cos(a), math.sin(a)
@@ -178,8 +181,8 @@ def create_monitor_plane(head_center, R_final, face_landmarks, w, h,
 
 
 
-def update_orbit_from_keys():
-    """Keyboard orbit controls that PRINT every frame while a key is held."""
+def update_orbit_from_keys(key):
+    """Orbit controls from OpenCV key codes (cross-platform; no `keyboard` package)."""
     global orbit_yaw, orbit_pitch, orbit_radius
     yaw_step   = math.radians(1.5)
     pitch_step = math.radians(1.5)
@@ -188,23 +191,23 @@ def update_orbit_from_keys():
     changed = False
 
     # Rotate
-    if keyboard.is_pressed('j'):  # yaw left
+    if key == ord('j'):  # yaw left
         orbit_yaw -= yaw_step; changed = True
-    if keyboard.is_pressed('l'):  # yaw right
+    if key == ord('l'):  # yaw right
         orbit_yaw += yaw_step; changed = True
-    if keyboard.is_pressed('i'):  # pitch up
+    if key == ord('i'):  # pitch up
         orbit_pitch += pitch_step; changed = True
-    if keyboard.is_pressed('k'):  # pitch down
+    if key == ord('k'):  # pitch down
         orbit_pitch -= pitch_step; changed = True
 
     # Zoom
-    if keyboard.is_pressed('['):  # zoom out
+    if key == ord('['):  # zoom out
         orbit_radius += zoom_step; changed = True
-    if keyboard.is_pressed(']'):  # zoom in
+    if key == ord(']'):  # zoom in
         orbit_radius = max(80.0, orbit_radius - zoom_step); changed = True
 
-    # Reset (prints every frame while held)
-    if keyboard.is_pressed('r'):
+    # Reset
+    if key == ord('r'):
         orbit_yaw = 0.0
         orbit_pitch = 0.0
         orbit_radius = 600.0
@@ -676,7 +679,7 @@ def render_debug_view_orbit(
         "R = reset view",
         "X = add marker",
         "q = quit",
-        "F7 = toggle mouse control"
+        "m = toggle mouse control"
     ]
 
     font        = cv2.FONT_HERSHEY_SIMPLEX
@@ -720,6 +723,8 @@ right_calibration_nose_scale = None
 
 while cap.isOpened():
     ret, frame = cap.read()
+    # Read keys early so orbit controls and toggles work without the `keyboard` package.
+    key = cv2.waitKey(1) & 0xFF
     if not ret:
         break
 
@@ -858,7 +863,7 @@ while cap.isOpened():
             cv2.circle(frame, (x, y), 0, (255, 255, 255), -1)
 
         # Smooth orbit controls each frame
-        update_orbit_from_keys()
+        update_orbit_from_keys(key)
 
         # Build 3D landmarks in your existing scale (x*w, y*h, z*w)
         landmarks3d = None
@@ -889,14 +894,12 @@ while cap.isOpened():
 
     cv2.imshow("Integrated Eye Tracking", frame)
 
-    # Handle keyboard input
-    if keyboard.is_pressed('f7'):
+    # Handle keyboard input (OpenCV keys work on Windows/macOS/Linux without root)
+    if key in (ord('m'), ord('M'), ord('7')):  # 'm' preferred; '7' kept for prior Mac PR habit
         mouse_control_enabled = not mouse_control_enabled
         print(f"[Mouse Control] {'Enabled' if mouse_control_enabled else 'Disabled'}")
-        time.sleep(0.3)  # debounce to prevent rapid toggling
-
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'):
+        time.sleep(0.2)  # debounce to prevent rapid toggling
+    elif key == ord('q'):
         break
     elif key == ord('c') and not (left_sphere_locked and right_sphere_locked):
         current_nose_scale = compute_scale(nose_points_3d)

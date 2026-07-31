@@ -12,12 +12,18 @@ Requirements
 - Python 3 or above
 - OpenCV (opencv-python)
 - NumPy
+- Tkinter (usually included with Python; on Linux install `python3-tk` if needed)
 - (Optional) PyOpenGL and gl_sphere.py for 3D visualization
 
 To install dependencies via terminal: 
 ```bash
-pip install opencv-python numpy tkinter
+pip install opencv-python numpy
 ```
+
+Camera backends
+- On Windows, the trackers try MSMF then DirectShow.
+- On macOS/Linux, they use OpenCV's default (`CAP_ANY`) backend.
+- Stereo tracking supports independent left/right camera selection and flip.
 
 Stereo Tracking
 

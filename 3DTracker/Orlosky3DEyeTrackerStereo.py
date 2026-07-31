@@ -162,7 +162,9 @@ def crop_to_aspect_ratio(image, width=640, height=480):
 
 # Apply thresholding to an image
 def apply_binary_threshold(image, darkestPixelValue, addedThreshold):
-    threshold = darkestPixelValue + addedThreshold
+    # Cast to int so uint8 pixel values do not wrap when adding the offset.
+    threshold = int(darkestPixelValue) + int(addedThreshold)
+    threshold = max(0, min(255, threshold))
     _, thresholded_image = cv2.threshold(image, threshold, 255, cv2.THRESH_BINARY_INV)
     return thresholded_image
 
@@ -187,7 +189,7 @@ def get_darkest_area(image):
                 for dx in range(0, searchArea, internalSkipSize):
                     if x + dx >= gray.shape[1]:
                         break
-                    current_sum += gray[y + dy][x + dx]
+                    current_sum += int(gray[y + dy, x + dx])
                     num_pixels += 1
 
             if current_sum < min_sum and num_pixels > 0:
@@ -556,7 +558,7 @@ def process_frames(thresholded_image_strict, thresholded_image_medium, threshold
     
     final_rotated_rect = None
 
-    if final_contours and not isinstance(final_contours[0], list) and len(final_contours[0] > 5):
+    if final_contours and not isinstance(final_contours[0], list) and len(final_contours[0]) > 5:
         ellipse = cv2.fitEllipse(final_contours[0])
         final_rotated_rect = ellipse
 
@@ -629,6 +631,9 @@ def process_frames(thresholded_image_strict, thresholded_image_medium, threshold
                 # safety cap so list does not grow forever
                 if len(stuck_ellipses) > max_stuck_ellipses:
                     stuck_ellipses = stuck_ellipses[-max_stuck_ellipses:]
+
+    # Draw previously saved ellipses so they stay "stuck" on screen
+    draw_stuck_ellipses(frame)
 
     # Calculate the extended endpoint of gaze line
     if final_rotated_rect is not None and center_x is not None and center_y is not None:
@@ -1075,10 +1080,16 @@ def process_frame(frame, return_rendered_frame=False, eye_id=None):
 
     #find the darkest point
     darkest_point = get_darkest_area(frame)
+    if darkest_point is None:
+        draw_persistent_overlays(frame)
+        cv2.imshow(eye_window_name("Tracking"), frame)
+        if return_rendered_frame:
+            return None, frame
+        return None
 
     # Convert to grayscale to handle pixel value operations
     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    darkest_pixel_value = gray_frame[darkest_point[1], darkest_point[0]]
+    darkest_pixel_value = int(gray_frame[darkest_point[1], darkest_point[0]])
     
     # apply thresholding operations at different levels
     # at least one should give us a good ellipse segment
@@ -1105,14 +1116,16 @@ def process_video(parent=None):
     while True:
         video_path = filedialog.askopenfilename(
             parent=parent,
-            filetypes=[("Video Files", "*.mp4;*.avi")],
+            filetypes=[("Video Files", "*.mp4 *.avi"), ("All files", "*.*")],
         )
 
         if not video_path:
             cv2.destroyAllWindows()
             return  # User canceled selection
 
-        reset_tracking_state()
+        # Keep per-eye state and stereo gaze output in sync for video mode.
+        reset_eye_tracking_state(current_eye_id)
+        load_eye_tracking_state(current_eye_id)
         cap = cv2.VideoCapture(video_path)
 
         if not cap.isOpened():

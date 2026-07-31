@@ -2,6 +2,7 @@ import cv2
 import random
 import math
 import numpy as np
+import sys
 import tkinter as tk
 from tkinter import ttk, filedialog
 
@@ -32,13 +33,38 @@ capture_frame_counter = 0          # counts processed frames while capture is en
 ellipse_capture_interval = 5      # save one ellipse every 10 frames
 max_stuck_ellipses = 20           # safety cap
 
+CAMERA_CAPTURE_MODES = (
+    (
+        ("MSMF", cv2.CAP_MSMF, None),
+        ("DirectShow + XVID", cv2.CAP_DSHOW, "XVID"),
+    )
+    if sys.platform == "win32"
+    else (("Auto", cv2.CAP_ANY, None),)
+)
+
+def open_camera_capture(cam_index, start_mode=0):
+    for mode_index in range(start_mode, len(CAMERA_CAPTURE_MODES)):
+        mode_name, backend, fourcc = CAMERA_CAPTURE_MODES[mode_index]
+        cap = cv2.VideoCapture(cam_index, backend)
+        if fourcc is not None:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        ret, frame = cap.read() if cap.isOpened() else (False, None)
+
+        if ret:
+            return cap, frame, mode_index
+
+        cap.release()
+        print(f"Could not grab a frame from camera {cam_index} with {mode_name}.")
+
+    return None, None, None
+
 # Function to detect available cameras
 def detect_cameras(max_cams=10):
     available_cameras = []
     for i in range(max_cams):
-        cap = cv2.VideoCapture(i, cv2.CAP_MSMF)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-        if cap.isOpened():
+        cap, _, _ = open_camera_capture(i)
+        if cap is not None:
             available_cameras.append(i)
             cap.release()
     return available_cameras
@@ -64,7 +90,9 @@ def crop_to_aspect_ratio(image, width=640, height=480):
 
 # Apply thresholding to an image
 def apply_binary_threshold(image, darkestPixelValue, addedThreshold):
-    threshold = darkestPixelValue + addedThreshold
+    # Cast to int so uint8 pixel values do not wrap when adding the offset.
+    threshold = int(darkestPixelValue) + int(addedThreshold)
+    threshold = max(0, min(255, threshold))
     _, thresholded_image = cv2.threshold(image, threshold, 255, cv2.THRESH_BINARY_INV)
     return thresholded_image
 
@@ -89,7 +117,7 @@ def get_darkest_area(image):
                 for dx in range(0, searchArea, internalSkipSize):
                     if x + dx >= gray.shape[1]:
                         break
-                    current_sum += gray[y + dy][x + dx]
+                    current_sum += int(gray[y + dy, x + dx])
                     num_pixels += 1
 
             if current_sum < min_sum and num_pixels > 0:
@@ -402,7 +430,7 @@ def process_frames(thresholded_image_strict, thresholded_image_medium, threshold
     
     final_rotated_rect = None
 
-    if final_contours and not isinstance(final_contours[0], list) and len(final_contours[0] > 5):
+    if final_contours and not isinstance(final_contours[0], list) and len(final_contours[0]) > 5:
         ellipse = cv2.fitEllipse(final_contours[0])
         final_rotated_rect = ellipse
 
@@ -475,7 +503,7 @@ def process_frames(thresholded_image_strict, thresholded_image_medium, threshold
                     stuck_ellipses = stuck_ellipses[-max_stuck_ellipses:]
 
     # Draw previously saved ellipses so they stay "stuck" on screen
-        draw_stuck_ellipses(frame)
+    draw_stuck_ellipses(frame)
 
     # Calculate the extended endpoint of gaze line
     if final_rotated_rect is not None and center_x is not None and center_y is not None:
@@ -874,10 +902,12 @@ def process_frame(frame):
 
     #find the darkest point
     darkest_point = get_darkest_area(frame)
+    if darkest_point is None:
+        return None
 
     # Convert to grayscale to handle pixel value operations
     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    darkest_pixel_value = gray_frame[darkest_point[1], darkest_point[0]]
+    darkest_pixel_value = int(gray_frame[darkest_point[1], darkest_point[0]])
     
     # apply thresholding operations at different levels
     # at least one should give us a good ellipse segment
@@ -906,18 +936,31 @@ def process_camera():
     cam_index = int(selected_camera.get())
 
     reset_tracking_state()
-    cap = cv2.VideoCapture(cam_index, cv2.CAP_MSMF)
+    cap, _, mode_index = open_camera_capture(cam_index)
 
-    if not cap.isOpened():
+    if cap is None:
         print("Error: Could not open camera.")
         return
+
+    print(f"Opened camera {cam_index} with {CAMERA_CAPTURE_MODES[mode_index][0]}.")
 
     while True:
         ret, frame = cap.read()
         if not ret:
+            # Retry remaining backends if the current capture stream stalls.
+            retry_mode = mode_index + 1
+            cap.release()
+            cap, frame, mode_index = open_camera_capture(cam_index, retry_mode)
+            if cap is None:
+                print("Error: Could not read from camera.")
+                break
+            print(f"Switched camera {cam_index} to {CAMERA_CAPTURE_MODES[mode_index][0]}.")
+            ret = True
+
+        if not ret:
             break
 
-        cv2.imshow("ORiginal Frame", frame)
+        cv2.imshow("Original Frame", frame)
 
         frame = cv2.flip(frame, 0)
         process_frame(frame)
@@ -942,7 +985,7 @@ def process_camera():
 
 # Process a selected video file
 def process_video():
-    video_path = filedialog.askopenfilename(filetypes=[("Video Files", "*.mp4;*.avi")])
+    video_path = filedialog.askopenfilename(filetypes=[("Video Files", "*.mp4 *.avi"), ("All files", "*.*")])
 
     if not video_path:
         return  # User canceled selection

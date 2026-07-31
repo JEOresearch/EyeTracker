@@ -25,7 +25,9 @@ def crop_to_aspect_ratio(image, width=640, height=480):
 
 # Apply thresholding to an image
 def apply_binary_threshold(image, darkestPixelValue, addedThreshold):
-    threshold = darkestPixelValue + addedThreshold
+    # Cast to int so uint8 pixel values do not wrap when adding the offset.
+    threshold = int(darkestPixelValue) + int(addedThreshold)
+    threshold = max(0, min(255, threshold))
     _, thresholded_image = cv2.threshold(image, threshold, 255, cv2.THRESH_BINARY_INV)
     return thresholded_image
 
@@ -50,7 +52,7 @@ def get_darkest_area(image):
                 for dx in range(0, searchArea, internalSkipSize):
                     if x + dx >= gray.shape[1]:
                         break
-                    current_sum += gray[y + dy][x + dx]
+                    current_sum += int(gray[y + dy, x + dx])
                     num_pixels += 1
 
             if current_sum < min_sum and num_pixels > 0:
@@ -128,7 +130,12 @@ def process_video(video_path, input_method):
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter('output_video.mp4', fourcc, 30.0, (640, 480))
 
-    cap = cv2.VideoCapture(video_path) if input_method == 1 else cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    if input_method == 1:
+        cap = cv2.VideoCapture(video_path)
+    else:
+        import sys
+        backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+        cap = cv2.VideoCapture(0, backend)
 
     if not cap.isOpened():
         print("Error: Could not open video.")
@@ -155,9 +162,13 @@ def process_video(video_path, input_method):
 def select_video():
     root = tk.Tk()
     root.withdraw()
-    video_path = 'C:/Storage/Google Drive/Eye Tracking/fulleyetest3.mp4'
-    if not os.path.exists(video_path):
-        video_path = filedialog.askopenfilename(filetypes=[("Video Files", "*.mp4;*.avi")])
+    candidate_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "eye_test.mp4"),
+        "eye_test.mp4",
+    ]
+    video_path = next((path for path in candidate_paths if os.path.exists(path)), None)
+    if video_path is None:
+        video_path = filedialog.askopenfilename(filetypes=[("Video Files", "*.mp4 *.avi"), ("All files", "*.*")])
     if video_path:
         process_video(video_path, 1)
 
