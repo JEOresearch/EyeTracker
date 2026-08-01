@@ -28,33 +28,26 @@ def apply_binary_threshold(image, darkestPixelValue, addedThreshold):
     return thresholded_image
 
 # Finds a square area of dark pixels in the image
-def get_darkest_area(image):
+def get_darkest_area(gray):
     ignoreBounds = 20
     imageSkipSize = 20
     searchArea = 20
     internalSkipSize = 10
 
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     min_sum = float('inf')
     darkest_point = None
 
-    for y in range(ignoreBounds, gray.shape[0] - ignoreBounds, imageSkipSize):
-        for x in range(ignoreBounds, gray.shape[1] - ignoreBounds, imageSkipSize):
-            current_sum = 0
-            num_pixels = 0
-            for dy in range(0, searchArea, internalSkipSize):
-                if y + dy >= gray.shape[0]:
-                    break
-                for dx in range(0, searchArea, internalSkipSize):
-                    if x + dx >= gray.shape[1]:
-                        break
-                    current_sum += gray[y + dy][x + dx]
-                    num_pixels += 1
-
-            if current_sum < min_sum and num_pixels > 0:
-                min_sum = current_sum
-                darkest_point = (x + searchArea // 2, y + searchArea // 2)
-
+    max_x = gray.shape[1] - max(ignoreBounds, searchArea)
+    skipRatio = searchArea // internalSkipSize
+    for y in range(ignoreBounds, gray.shape[0] - max(ignoreBounds, searchArea), imageSkipSize):
+        current_sum = np.zeros((gray.shape[1] - (ignoreBounds + max(ignoreBounds, searchArea))) // searchArea * skipRatio)
+        for dy in range(0, searchArea, internalSkipSize):
+            current_sum += gray[y + dy][ignoreBounds:max_x:internalSkipSize]
+        current_sum = np.convolve(current_sum, np.ones(skipRatio), 'valid')[::skipRatio]
+        dx = np.argmin(current_sum)
+        if current_sum[dx] < min_sum:
+            min_sum = current_sum[dx]
+            darkest_point = (dx * searchArea + ignoreBounds + searchArea // 2, y + searchArea // 2)
     return darkest_point
     
 # Mask all pixels outside a square defined by center and size
@@ -125,25 +118,31 @@ def process_frame(frame):
     start_time = time.time()
     
     frame = crop_to_aspect_ratio(frame)
+    firstTime = time.time() - start_time
     #print(f"Time after crop_to_aspect_ratio: {time.time() - start_time:.6f} seconds")
-    
-    darkest_point = get_darkest_area(frame)
-    #print(f"Time after get_darkest_area: {time.time() - start_time:.6f} seconds")
-    
+
     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    secondTime = time.time() - start_time
     #print(f"Time after cvtColor to gray: {time.time() - start_time:.6f} seconds")
+    
+    darkest_point = get_darkest_area(gray_frame)
+    thirdTime = time.time() - start_time
+    #print(f"Time after get_darkest_area: {time.time() - start_time:.6f} seconds")
     
     darkest_pixel_value = gray_frame[darkest_point[1], darkest_point[0]]
     thresholded_image_medium = apply_binary_threshold(gray_frame, darkest_pixel_value, 15)
+    fourthTime = time.time() - start_time
     #print(f"Time after apply_binary_threshold: {time.time() - start_time:.6f} seconds")
     
     thresholded_image_medium = mask_outside_square(thresholded_image_medium, darkest_point, 250)
+    fifthTime = time.time() - start_time
     #print(f"Time after mask_outside_square: {time.time() - start_time:.6f} seconds")
     
     result = process_frames(thresholded_image_medium, frame, gray_frame, darkest_point, False, False)
+    endTime = time.time() - start_time
     #print(f"Time after process_frames: {time.time() - start_time:.6f} seconds")
     
-    return result
+    return result, firstTime, secondTime, thirdTime, fourthTime, fifthTime, endTime
 
 # Process video frames for pupil detection using OpenCV
 def process_video_with_opencv():
@@ -169,5 +168,32 @@ def process_video_with_opencv():
     cap.release()
     cv2.destroyAllWindows()
 
+# Process video frames for pupil detection
+def process_video(video_path):
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print("Error: Could not open video.")
+        return
+
+    debug_mode_on = False
+    sums = np.zeros(6)
+    count = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        results = process_frame(frame)
+        times = results[1:]
+        sums += times
+        count += 1
+    avgs = sums / count
+    print(avgs)
+
+    cap.release()
+    cv2.destroyAllWindows()
+
 if __name__ == "__main__":
-    process_video_with_opencv()
+    process_video("/home/pi/EyeTracker/eye_test.mp4")
