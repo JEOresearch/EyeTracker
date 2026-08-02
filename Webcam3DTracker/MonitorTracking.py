@@ -8,6 +8,7 @@ from scipy.spatial.transform import Rotation as Rscipy
 from collections import deque
 import pyautogui
 import threading
+import platform
 import keyboard
 
 # Screen and mouse control setup (from old script)
@@ -81,7 +82,10 @@ nose_indices = [4, 45, 275, 220, 440, 1, 5, 51, 281, 44, 274, 241,
                 3, 248]
 
 # ===== NEW: File writing for screen position =====
-screen_position_file = "C:/Storage/Google Drive/Software/EyeTracker3DPython/screen_position.txt"
+if (platform.system() == "Darwin"):  # macOS
+    screen_position_file = 'screen_position.txt' # in current directory for macOS
+else:
+    screen_position_file = "C:/Storage/Google Drive/Software/EyeTracker3DPython/screen_position.txt" # Windows path
 
 def write_screen_position(x, y):
     """Write screen position to file, overwriting the same line"""
@@ -178,7 +182,7 @@ def create_monitor_plane(head_center, R_final, face_landmarks, w, h,
 
 
 
-def update_orbit_from_keys():
+def update_orbit_from_keys(key):
     """Keyboard orbit controls that PRINT every frame while a key is held."""
     global orbit_yaw, orbit_pitch, orbit_radius
     yaw_step   = math.radians(1.5)
@@ -188,23 +192,23 @@ def update_orbit_from_keys():
     changed = False
 
     # Rotate
-    if keyboard.is_pressed('j'):  # yaw left
+    if key == ord('j'):  # yaw left
         orbit_yaw -= yaw_step; changed = True
-    if keyboard.is_pressed('l'):  # yaw right
+    if key == ord('l'):  # yaw right
         orbit_yaw += yaw_step; changed = True
-    if keyboard.is_pressed('i'):  # pitch up
+    if key == ord('i'):  # pitch up
         orbit_pitch += pitch_step; changed = True
-    if keyboard.is_pressed('k'):  # pitch down
+    if key == ord('k'):  # pitch down
         orbit_pitch -= pitch_step; changed = True
 
     # Zoom
-    if keyboard.is_pressed('['):  # zoom out
+    if key == ord('['):  # zoom out
         orbit_radius += zoom_step; changed = True
-    if keyboard.is_pressed(']'):  # zoom in
+    if key == ord(']'):  # zoom in
         orbit_radius = max(80.0, orbit_radius - zoom_step); changed = True
 
     # Reset (prints every frame while held)
-    if keyboard.is_pressed('r'):
+    if key == ord('r'):
         orbit_yaw = 0.0
         orbit_pitch = 0.0
         orbit_radius = 600.0
@@ -676,7 +680,7 @@ def render_debug_view_orbit(
         "R = reset view",
         "X = add marker",
         "q = quit",
-        "F7 = toggle mouse control"
+        "7 = toggle mouse control"
     ]
 
     font        = cv2.FONT_HERSHEY_SIMPLEX
@@ -720,6 +724,7 @@ right_calibration_nose_scale = None
 
 while cap.isOpened():
     ret, frame = cap.read()
+    key = cv2.waitKey(1) & 0xFF
     if not ret:
         break
 
@@ -858,7 +863,7 @@ while cap.isOpened():
             cv2.circle(frame, (x, y), 0, (255, 255, 255), -1)
 
         # Smooth orbit controls each frame
-        update_orbit_from_keys()
+        update_orbit_from_keys(key)
 
         # Build 3D landmarks in your existing scale (x*w, y*h, z*w)
         landmarks3d = None
@@ -890,12 +895,11 @@ while cap.isOpened():
     cv2.imshow("Integrated Eye Tracking", frame)
 
     # Handle keyboard input
-    if keyboard.is_pressed('f7'):
+    if key == ord('7'):
         mouse_control_enabled = not mouse_control_enabled
         print(f"[Mouse Control] {'Enabled' if mouse_control_enabled else 'Disabled'}")
         time.sleep(0.3)  # debounce to prevent rapid toggling
 
-    key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
         break
     elif key == ord('c') and not (left_sphere_locked and right_sphere_locked):
