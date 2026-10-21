@@ -1300,6 +1300,15 @@ def calibrate_gaze_to_external():
     global calibrated, calibrated_sphere_center, sphere_center_locked_2d
     global locked_model_center_avg, calibration_basis, calibration_matrix
     global calibration_message, calibration_samples
+    if calibrated:
+        reset_accuracy_grid()
+        # Show CENTER before accepting a sample; preserve the current eye model.
+        calibration_samples = []
+        calibration_basis = calibration_matrix = None
+        calibrated = False
+        calibration_message = "Align your finger and gaze with CENTER; press C."
+        print(calibration_message)
+        return True
     if last_gaze_dir is None or last_sphere_center is None:
         calibration_message = "No current gaze detected; keep looking at target and retry C."
         print(calibration_message)
@@ -1309,12 +1318,6 @@ def calibrate_gaze_to_external():
         calibration_message = "Invalid gaze sample; retry C."
         return False
     direction = direction / np.linalg.norm(direction)
-    if calibrated:
-        reset_accuracy_grid()
-        # Preserve the current eye model and start a new center sample.
-        calibration_samples = []
-        calibration_basis = calibration_matrix = None
-        calibrated = False
     if not calibration_samples:
         calibrated_sphere_center = last_sphere_center.copy()
         locked_model_center_avg = prev_model_center_avg
@@ -1334,7 +1337,7 @@ def calibrate_gaze_to_external():
         return False
     calibration_basis, calibration_matrix = basis, matrix
     calibrated = True
-    calibration_message = f"Fit RMS: {error:.1f} pixels. C starts a new center capture."
+    calibration_message = f"Fit RMS: {error:.1f} pixels. C restarts calibration at CENTER."
     print("Five-point calibration complete.", calibration_message)
     print("Tangent-to-pixel matrix:", matrix)
     return True
