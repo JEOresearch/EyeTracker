@@ -298,7 +298,7 @@ def get_darkest_area(image):
 
     for y in range(ignoreBounds, gray.shape[0] - ignoreBounds, imageSkipSize):
         for x in range(ignoreBounds, gray.shape[1] - ignoreBounds, imageSkipSize):
-            current_sum = 0
+            current_sum = np.int64(0)
             num_pixels = 0
             for dy in range(0, searchArea, internalSkipSize):
                 if y + dy >= gray.shape[0]:
